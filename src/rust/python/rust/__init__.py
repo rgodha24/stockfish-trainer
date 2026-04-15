@@ -1,3 +1,3 @@
-from rust._internal import BatchStream
+from ._internal import BatchStream
 
 __all__ = ["BatchStream"]

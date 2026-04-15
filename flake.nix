@@ -28,7 +28,7 @@
       in {
         devShells.default = pkgs.mkShell.override { inherit stdenv; } {
           buildInputs = with pkgs; [
-            python3
+            python312
             uv
 
             rustc

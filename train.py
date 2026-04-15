@@ -5,9 +5,9 @@ from dataclasses import asdict
 
 import torch
 import tyro
-import wandb
 from torch.utils.data import DataLoader
 
+import wandb
 from config import TrainingConfig
 from src.data import DataloaderSkipConfig, FixedNumBatchesDataset, SparseBatchDataset
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
@@ -206,7 +206,7 @@ def main() -> None:
             global_step += 1
 
             if (
-                batch_idx % max(1, num_batches // 5) == 0
+                batch_idx % max(1, num_batches // 4) == 0
                 or batch_idx == num_batches - 1
             ):
                 print(
@@ -220,7 +220,7 @@ def main() -> None:
         elapsed = time.time() - epoch_start
         lr = optimizer.param_groups[0]["lr"]
         print(
-            f"epoch={epoch:03d} done loss={epoch_loss:.6f} lr={lr:.8g} time={elapsed:.1f}s",
+            f"epoch={epoch:03d} done loss={epoch_loss:.6f} lr={lr:.8g} time={elapsed:.1f}s it/s={num_batches / elapsed:.1f}",
             flush=True,
         )
         wandb.log(
@@ -229,6 +229,7 @@ def main() -> None:
                 "train/loss_epoch": epoch_loss,
                 "train/lr": lr,
                 "train/epoch_time_sec": elapsed,
+                "train/it_per_sec": num_batches / elapsed,
             },
             step=global_step,
         )
