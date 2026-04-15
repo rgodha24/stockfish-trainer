@@ -1,19 +1,26 @@
 [build-system]
-requires = ["maturin>=1.13,<2.0"]
+requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "stockfish-trainer"
-requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch",
+  "lightning",
+  "tyro",
+  "torchmetrics",
+  "python-chess==0.31.4",
+  "numpy<2.0",
+  "wandb",
+  "ranger22",
+  "tilelang==0.1.8",
 ]
-dynamic = ["version"]
-[project.optional-dependencies]
-tests = [
-    "pytest",
-]
+
+[tool.uv.sources]
+ranger22 = { git = "https://github.com/rgodha24/ranger22" }
+
 [tool.maturin]
-python-source = "python"
+python-source = "src/rust/python"
+module-name = "rust._internal"
