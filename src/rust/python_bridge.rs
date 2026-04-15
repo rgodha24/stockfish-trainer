@@ -3,38 +3,30 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use numpy::ndarray::{ArrayView1, ArrayView2};
-use numpy::{PyArray1, PyArray2};
+use numpy::IntoPyArray;
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
 
 use crate::feature_extraction::FeatureSet;
 use crate::pipeline::{
-    default_batch_slab_count, BatchPipeline, PipelineConfig, PipelineError, PooledBatch,
-    SkipConfig, ThreadOverride,
+    encode_packed_chunks, EncodedBatch, PackedEntryStream, PackedStreamConfig, PipelineError,
+    SkipConfig,
 };
 
-#[pyclass(name = "BatchStream")]
-pub struct PyBatchStream {
-    pipeline: Mutex<Option<BatchPipeline>>,
-}
-
-#[pyclass]
-struct PyBatchOwner {
-    batch: PooledBatch,
+#[pyclass(name = "PackedEntryStream")]
+pub struct PyPackedEntryStream {
+    stream: Mutex<Option<PackedEntryStream>>,
 }
 
 #[pymethods]
-impl PyBatchStream {
+impl PyPackedEntryStream {
     #[new]
     #[pyo3(signature = (
-        feature_set,
         filenames,
-        batch_size,
         total_threads=None,
         decode_threads=None,
-        encode_threads=None,
-        slab_count=None,
+        chunk_entries=8192,
         shuffle_buffer_entries=16384,
         seed=None,
         cyclic=false,
@@ -52,13 +44,10 @@ impl PyBatchStream {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        feature_set: &str,
         filenames: Vec<String>,
-        batch_size: usize,
         total_threads: Option<usize>,
         decode_threads: Option<usize>,
-        encode_threads: Option<usize>,
-        slab_count: Option<usize>,
+        chunk_entries: usize,
         shuffle_buffer_entries: usize,
         seed: Option<u64>,
         cyclic: bool,
@@ -74,24 +63,13 @@ impl PyBatchStream {
         rank: usize,
         world_size: usize,
     ) -> PyResult<Self> {
-        let feature_set = FeatureSet::from_str(feature_set)
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let mut config = PipelineConfig::new(
-            filenames.into_iter().map(PathBuf::from).collect(),
-            feature_set,
-            batch_size,
-        );
+        let mut config =
+            PackedStreamConfig::new(filenames.into_iter().map(PathBuf::from).collect());
         if let Some(total_threads) = total_threads {
             config.total_threads = total_threads;
         }
-        if decode_threads.is_some() || encode_threads.is_some() {
-            config.thread_override = Some(ThreadOverride {
-                decode: decode_threads,
-                encode: encode_threads,
-            });
-        }
-        config.slab_count =
-            slab_count.unwrap_or_else(|| default_batch_slab_count(config.total_threads));
+        config.decode_threads = decode_threads;
+        config.chunk_entries = chunk_entries;
         config.shuffle_buffer_entries = shuffle_buffer_entries;
         config.seed = seed;
         config.cyclic = cyclic;
@@ -109,23 +87,23 @@ impl PyBatchStream {
             pc_y3,
         };
 
-        let pipeline = BatchPipeline::new(config).map_err(to_py_runtime_error)?;
+        let stream = PackedEntryStream::new(config).map_err(to_py_runtime_error)?;
         Ok(Self {
-            pipeline: Mutex::new(Some(pipeline)),
+            stream: Mutex::new(Some(stream)),
         })
     }
 
-    fn next_batch<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let maybe_batch = py.allow_threads(|| {
-            let guard = self.pipeline.lock().unwrap();
+    fn next_chunk<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let maybe_chunk = py.allow_threads(|| {
+            let guard = self.stream.lock().unwrap();
             match guard.as_ref() {
-                Some(pipeline) => pipeline.next_batch(),
+                Some(stream) => stream.next_chunk(),
                 None => Ok(None),
             }
         });
 
-        match maybe_batch {
-            Ok(Some(batch)) => Ok(Some(batch_to_pydict(py, batch)?)),
+        match maybe_chunk {
+            Ok(Some(chunk)) => Ok(Some(PyBytes::new(py, &chunk))),
             Ok(None) => Ok(None),
             Err(error) => Err(to_py_runtime_error(error)),
         }
@@ -133,12 +111,12 @@ impl PyBatchStream {
 
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let stats = {
-            let guard = self.pipeline.lock().unwrap();
+            let guard = self.stream.lock().unwrap();
             match guard.as_ref() {
-                Some(pipeline) => pipeline.stats(),
+                Some(stream) => stream.stats(),
                 None => {
                     return Err(PyRuntimeError::new_err(
-                        "batch stream has already been closed",
+                        "packed entry stream already closed",
                     ))
                 }
             }
@@ -146,18 +124,15 @@ impl PyBatchStream {
 
         let dict = PyDict::new(py);
         dict.set_item("decoded_entries", stats.decoded_entries)?;
-        dict.set_item("encoded_entries", stats.encoded_entries)?;
         dict.set_item("skipped_entries", stats.skipped_entries)?;
-        dict.set_item("produced_batches", stats.produced_batches)?;
+        dict.set_item("produced_chunks", stats.produced_chunks)?;
         dict.set_item("scanned_chunks", stats.scanned_chunks)?;
-        dict.set_item("decoded_queue_len", stats.decoded_queue_len)?;
-        dict.set_item("ready_queue_len", stats.ready_queue_len)?;
-        dict.set_item("free_queue_len", stats.free_queue_len)?;
+        dict.set_item("chunk_queue_len", stats.chunk_queue_len)?;
         Ok(dict)
     }
 
     fn close(&self) {
-        let mut guard = self.pipeline.lock().unwrap();
+        let mut guard = self.stream.lock().unwrap();
         let _ = guard.take();
     }
 
@@ -165,24 +140,35 @@ impl PyBatchStream {
         slf
     }
 
-    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        match self.next_batch(py)? {
-            Some(batch) => Ok(batch),
-            None => Err(PyStopIteration::new_err("batch stream is exhausted")),
+    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        match self.next_chunk(py)? {
+            Some(chunk) => Ok(chunk),
+            None => Err(PyStopIteration::new_err("packed entry stream exhausted")),
         }
     }
 }
 
+#[pyfunction(name = "encode_packed_chunks")]
+fn encode_packed_chunks_py<'py>(
+    py: Python<'py>,
+    feature_set: &str,
+    chunks: Vec<Vec<u8>>,
+    batch_size: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let feature_set = FeatureSet::from_str(feature_set)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let batch =
+        encode_packed_chunks(&feature_set, &chunks, batch_size).map_err(to_py_runtime_error)?;
+    batch_to_pydict(py, &batch)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyBatchStream>()?;
+    m.add_class::<PyPackedEntryStream>()?;
+    m.add_function(wrap_pyfunction!(encode_packed_chunks_py, m)?)?;
     Ok(())
 }
 
-fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'py, PyDict>> {
-    let owner = Py::new(py, PyBatchOwner { batch })?;
-    let owner_bound = owner.bind(py);
-    let owner_ref = owner_bound.borrow();
-    let batch = owner_ref.batch.slab();
+fn batch_to_pydict<'py>(py: Python<'py>, batch: &EncodedBatch) -> PyResult<Bound<'py, PyDict>> {
     let rows = batch.len();
     let cols = batch.max_active_features();
 
@@ -199,18 +185,13 @@ fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'
     let psqt_indices_view = ArrayView1::from(batch.psqt_indices_slice());
     let layer_stack_indices_view = ArrayView1::from(batch.layer_stack_indices_slice());
 
-    let is_white =
-        unsafe { PyArray2::borrow_from_array(&is_white_view, owner_bound.clone().into_any()) };
-    let outcome =
-        unsafe { PyArray2::borrow_from_array(&outcome_view, owner_bound.clone().into_any()) };
-    let score = unsafe { PyArray2::borrow_from_array(&score_view, owner_bound.clone().into_any()) };
-    let white = unsafe { PyArray2::borrow_from_array(&white_view, owner_bound.clone().into_any()) };
-    let black = unsafe { PyArray2::borrow_from_array(&black_view, owner_bound.clone().into_any()) };
-    let psqt_indices =
-        unsafe { PyArray1::borrow_from_array(&psqt_indices_view, owner_bound.clone().into_any()) };
-    let layer_stack_indices = unsafe {
-        PyArray1::borrow_from_array(&layer_stack_indices_view, owner_bound.clone().into_any())
-    };
+    let is_white = is_white_view.to_owned().into_pyarray(py);
+    let outcome = outcome_view.to_owned().into_pyarray(py);
+    let score = score_view.to_owned().into_pyarray(py);
+    let white = white_view.to_owned().into_pyarray(py);
+    let black = black_view.to_owned().into_pyarray(py);
+    let psqt_indices = psqt_indices_view.to_owned().into_pyarray(py);
+    let layer_stack_indices = layer_stack_indices_view.to_owned().into_pyarray(py);
 
     let dict = PyDict::new(py);
     dict.set_item("num_inputs", batch.num_inputs())?;

@@ -1,7 +1,6 @@
-from .loader import DataloaderSkipConfig, SparseBatchDataset, FixedNumBatchesDataset
+from .loader import DataloaderSkipConfig, make_sparse_batch_dataset
 
 __all__ = [
     "DataloaderSkipConfig",
-    "SparseBatchDataset",
-    "FixedNumBatchesDataset",
+    "make_sparse_batch_dataset",
 ]

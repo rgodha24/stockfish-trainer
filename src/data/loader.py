@@ -1,6 +1,4 @@
 import os
-import queue
-import threading
 from dataclasses import dataclass
 
 import torch
@@ -21,74 +19,120 @@ class DataloaderSkipConfig:
     pc_y3: float = 1.0
 
 
-def _recursive_pin(obj):
-    if not torch.cuda.is_available():
-        return obj
-    if isinstance(obj, torch.Tensor):
-        return obj.pin_memory()
-    if isinstance(obj, dict):
-        return {k: _recursive_pin(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(_recursive_pin(v) for v in obj)
-    return obj
+def _infer_world(rank: int | None, world_size: int | None) -> tuple[int, int]:
+    if rank is None:
+        rank = int(os.environ.get("RANK", "0"))
+    if world_size is None:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    return rank, world_size
 
 
-class RustSparseBatchProvider:
+class PackedChunkDataset(torch.utils.data.IterableDataset):
     def __init__(
         self,
-        feature_set: str,
         filenames: list[str],
-        batch_size: int,
+        chunk_entries: int,
         cyclic: bool,
         loader_threads: int,
         config: DataloaderSkipConfig,
+        rank: int | None = None,
+        world_size: int | None = None,
     ):
-        if loader_threads > 0:
-            total_threads = loader_threads
-        else:
-            try:
-                cpu_count = len(os.sched_getaffinity(0))
-            except (AttributeError, OSError):
-                cpu_count = os.cpu_count() or 8
-            total_threads = max(1, cpu_count - 1)
+        super().__init__()
+        self.filenames = list(filenames)
+        self.chunk_entries = int(chunk_entries)
+        self.cyclic = bool(cyclic)
+        self.loader_threads = int(loader_threads)
+        self.config = config
+        self.rank, self.world_size = _infer_world(rank, world_size)
 
-        decode_threads = max(1, (total_threads * 9) // 10)
-        encode_threads = max(1, total_threads - decode_threads)
-        slab_count = max(8, encode_threads + max(4, encode_threads // 2))
+    def _total_threads(self) -> int:
+        if self.loader_threads > 0:
+            return self.loader_threads
+        try:
+            cpu_count = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            cpu_count = os.cpu_count() or 8
+        return max(1, cpu_count - 1)
 
-        self._stream = rust.BatchStream(
-            feature_set.replace("^", ""),
-            list(filenames),
-            batch_size,
-            total_threads=total_threads,
-            decode_threads=decode_threads,
-            encode_threads=encode_threads,
-            slab_count=slab_count,
+    def __iter__(self):
+        stream = rust.PackedEntryStream(
+            list(self.filenames),
+            total_threads=self._total_threads(),
+            decode_threads=None,
+            chunk_entries=self.chunk_entries,
             shuffle_buffer_entries=16384,
-            cyclic=cyclic,
-            filtered=config.filtered,
-            random_fen_skipping=int(config.random_fen_skipping),
-            wld_filtered=config.wld_filtered,
-            early_fen_skipping=int(config.early_fen_skipping),
-            simple_eval_skipping=int(config.simple_eval_skipping or 0),
-            param_index=int(config.param_index),
-            pc_y1=float(config.pc_y1),
-            pc_y2=float(config.pc_y2),
-            pc_y3=float(config.pc_y3),
-            rank=0,
-            world_size=1,
+            seed=None,
+            cyclic=self.cyclic,
+            filtered=self.config.filtered,
+            random_fen_skipping=int(self.config.random_fen_skipping),
+            wld_filtered=self.config.wld_filtered,
+            early_fen_skipping=int(self.config.early_fen_skipping),
+            simple_eval_skipping=int(self.config.simple_eval_skipping or 0),
+            param_index=int(self.config.param_index),
+            pc_y1=float(self.config.pc_y1),
+            pc_y2=float(self.config.pc_y2),
+            pc_y3=float(self.config.pc_y3),
+            rank=self.rank,
+            world_size=self.world_size,
         )
+        try:
+            while True:
+                chunk = stream.next_chunk()
+                if chunk is None:
+                    break
+                yield chunk
+        finally:
+            stream.close()
 
+
+class EncodedBatchDataset(torch.utils.data.IterableDataset):
+    def __init__(
+        self,
+        feature_set: str,
+        chunk_dataset: PackedChunkDataset,
+        batch_size: int,
+        chunk_entries: int,
+        max_batches: int | None = None,
+    ):
+        super().__init__()
+        self.feature_set = feature_set.replace("^", "")
+        self.chunk_dataset = chunk_dataset
+        self.batch_size = int(batch_size)
+        self.chunk_entries = int(chunk_entries)
+        self.max_batches = max_batches
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if self.chunk_entries <= 0:
+            raise ValueError("chunk_entries must be positive")
+        if self.batch_size % self.chunk_entries != 0:
+            raise ValueError("batch_size must be divisible by chunk_entries")
+        self.chunks_per_batch = self.batch_size // self.chunk_entries
         self._ones_buffer: torch.Tensor | None = None
 
     def __iter__(self):
-        return self
+        chunk_iter = iter(self.chunk_dataset)
+        yielded = 0
+        while True:
+            if self.max_batches is not None and yielded >= self.max_batches:
+                return
+            chunks: list[bytes] = []
+            for _ in range(self.chunks_per_batch):
+                try:
+                    chunks.append(next(chunk_iter))
+                except StopIteration:
+                    return
 
-    def __next__(self):
-        batch = self._stream.next_batch()
-        if batch is None:
-            raise StopIteration
+            batch = rust.encode_packed_chunks(self.feature_set, chunks, self.batch_size)
+            yielded += 1
+            yield self._batch_to_tuple(batch)
 
+    def __len__(self):
+        if self.max_batches is None:
+            raise TypeError("dataset length is undefined without max_batches")
+        return self.max_batches
+
+    def _batch_to_tuple(self, batch):
         us = torch.from_numpy(batch["is_white"])
         them = 1.0 - us
         white_indices = torch.from_numpy(batch["white"])
@@ -104,12 +148,7 @@ class RustSparseBatchProvider:
             or self._ones_buffer.shape[1] != cols
             or self._ones_buffer.shape[0] < rows
         ):
-            buf = torch.ones((rows, cols), dtype=torch.float32)
-            try:
-                buf = buf.pin_memory()
-            except RuntimeError:
-                pass
-            self._ones_buffer = buf
+            self._ones_buffer = torch.ones((rows, cols), dtype=torch.float32)
         values = self._ones_buffer[:rows]
 
         return (
@@ -125,106 +164,32 @@ class RustSparseBatchProvider:
             layer_stack_indices,
         )
 
-    def __del__(self):
-        if hasattr(self, "_stream"):
-            self._stream.close()
 
-
-class SparseBatchDataset(torch.utils.data.IterableDataset):
-    def __init__(
-        self,
-        feature_set: str,
-        filenames: list[str],
-        batch_size: int,
-        cyclic: bool = True,
-        loader_threads: int = -1,
-        config: DataloaderSkipConfig = DataloaderSkipConfig(),
-    ):
-        super().__init__()
-        self.feature_set = feature_set
-        self.filenames = filenames
-        self.batch_size = batch_size
-        self.cyclic = cyclic
-        self.loader_threads = loader_threads
-        self.config = config
-
-    def __iter__(self):
-        return RustSparseBatchProvider(
-            self.feature_set,
-            self.filenames,
-            self.batch_size,
-            cyclic=self.cyclic,
-            loader_threads=self.loader_threads,
-            config=self.config,
-        )
-
-
-class FixedNumBatchesDataset(torch.utils.data.Dataset):
-    def __init__(
-        self, dataset, num_batches, pin_memory: bool = False, queue_size_limit=16
-    ):
-        super().__init__()
-        self.dataset = dataset
-        self.iter = None
-        self.num_batches = num_batches
-        self.pin_memory = pin_memory
-
-        self._prefetch_queue = queue.Queue(maxsize=queue_size_limit)
-        self._prefetch_thread = None
-        self._stop_prefetching = threading.Event()
-        self._prefetch_started = False
-        self._lock = threading.Lock()
-
-    def _safe_put(self, item):
-        while not self._stop_prefetching.is_set():
-            try:
-                self._prefetch_queue.put(item, timeout=1.0)
-                break
-            except queue.Full:
-                continue
-
-    def _prefetch_worker(self):
-        try:
-            while not self._stop_prefetching.is_set():
-                try:
-                    item = next(self.iter)
-                    if self.pin_memory:
-                        item = _recursive_pin(item)
-                    self._safe_put(item)
-                except StopIteration:
-                    self._safe_put(None)
-                    break
-        except Exception as e:
-            self._safe_put(e)
-
-    def _start_prefetching(self):
-        with self._lock:
-            if not self._prefetch_started:
-                self.iter = iter(self.dataset)
-                self._prefetch_thread = threading.Thread(
-                    target=self._prefetch_worker, daemon=True
-                )
-                self._prefetch_thread.start()
-                self._prefetch_started = True
-
-    def __len__(self):
-        return self.num_batches
-
-    def __getitem__(self, idx):
-        _ = idx
-        self._start_prefetching()
-        try:
-            item = self._prefetch_queue.get(timeout=300.0)
-            if item is None:
-                raise StopIteration("End of dataset reached")
-            if isinstance(item, Exception):
-                raise item
-            return item
-        except queue.Empty as e:
-            raise RuntimeError("Prefetch timeout - no data available") from e
-
-    def __del__(self):
-        if hasattr(self, "_stop_prefetching"):
-            self._stop_prefetching.set()
-        if hasattr(self, "_prefetch_thread") and self._prefetch_thread:
-            self._prefetch_thread.join(timeout=1.0)
+def make_sparse_batch_dataset(
+    feature_set: str,
+    filenames: list[str],
+    batch_size: int,
+    cyclic: bool = True,
+    loader_threads: int = -1,
+    config: DataloaderSkipConfig = DataloaderSkipConfig(),
+    chunk_entries: int = 8192,
+    rank: int | None = None,
+    world_size: int | None = None,
+    max_batches: int | None = None,
+) -> EncodedBatchDataset:
+    chunk_dataset = PackedChunkDataset(
+        filenames=filenames,
+        chunk_entries=chunk_entries,
+        cyclic=cyclic,
+        loader_threads=loader_threads,
+        config=config,
+        rank=rank,
+        world_size=world_size,
+    )
+    return EncodedBatchDataset(
+        feature_set=feature_set,
+        chunk_dataset=chunk_dataset,
+        batch_size=batch_size,
+        chunk_entries=chunk_entries,
+        max_batches=max_batches,
+    )

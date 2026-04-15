@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 from config import TrainingConfig
-from src.data import DataloaderSkipConfig, FixedNumBatchesDataset, SparseBatchDataset
+from src.data import DataloaderSkipConfig, make_sparse_batch_dataset
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 
 
@@ -33,26 +33,22 @@ def make_train_loader(args: TrainingConfig) -> DataLoader:
         early_fen_skipping=args.early_fen_skipping,
         simple_eval_skipping=args.simple_eval_skipping,
     )
-    stream = SparseBatchDataset(
-        args.features,
-        list(args.datasets),
-        args.batch_size,
+    stream = make_sparse_batch_dataset(
+        feature_set=args.features,
+        filenames=list(args.datasets),
+        batch_size=args.batch_size,
         cyclic=True,
         loader_threads=args.loader_threads,
         config=skip_cfg,
-    )
-    num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
-    fixed = FixedNumBatchesDataset(
-        stream,
-        num_batches,
-        pin_memory=args.pin_memory,
-        queue_size_limit=args.data_loader_queue_size,
+        chunk_entries=args.chunk_entries,
+        max_batches=num_batches_for_size(args.epoch_size, args.batch_size),
     )
     return DataLoader(
-        fixed,
+        stream,
         batch_size=None,
         batch_sampler=None,
         num_workers=0,
+        pin_memory=args.pin_memory,
     )
 
 
