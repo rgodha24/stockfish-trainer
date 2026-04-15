@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 import time
 from dataclasses import asdict
 
@@ -54,6 +55,30 @@ def make_train_loader(args: TrainingConfig) -> DataLoader:
         pin_memory=args.pin_memory,
         persistent_workers=args.data_loader_workers > 0,
         prefetch_factor=prefetch_factor,
+    )
+
+
+def save_training_checkpoint(
+    path: str,
+    *,
+    epoch: int,
+    global_step: int,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    args: TrainingConfig,
+) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "global_step": global_step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "training_config": asdict(args),
+        },
+        path,
     )
 
 
@@ -140,6 +165,7 @@ def main() -> None:
         config=asdict(args),
     )
 
+    checkpoint_dir = os.path.join(args.default_root_dir, "checkpoints")
     global_step = 0
     for epoch in range(args.max_epochs):
         model.train()
@@ -236,6 +262,33 @@ def main() -> None:
             },
             step=global_step,
         )
+
+        if args.checkpoint_every_epochs > 0 and (epoch + 1) % args.checkpoint_every_epochs == 0:
+            last_path = os.path.join(checkpoint_dir, "last.pt")
+            epoch_path = os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pt")
+            save_training_checkpoint(
+                epoch_path,
+                epoch=epoch,
+                global_step=global_step,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                args=args,
+            )
+            shutil.copyfile(epoch_path, last_path)
+            print(f"saved checkpoints {epoch_path} -> {last_path}", flush=True)
+
+    final_path = os.path.join(checkpoint_dir, "final.pt")
+    save_training_checkpoint(
+        final_path,
+        epoch=args.max_epochs - 1,
+        global_step=global_step,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        args=args,
+    )
+    print(f"saved final checkpoint {final_path}", flush=True)
 
     run.finish()
 

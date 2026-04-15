@@ -48,6 +48,7 @@ class TrainingConfig:
 
     seed: int = 42
     default_root_dir: str = "logs"
+    checkpoint_every_epochs: int = 10
     wandb_project: str = "stockfish-trainer"
     wandb_run_name: str | None = None
 
@@ -68,3 +69,5 @@ class TrainingConfig:
             raise ValueError("`data_loader_workers` must be non-negative.")
         if self.encode_threads < 0:
             raise ValueError("`encode_threads` must be non-negative.")
+        if self.checkpoint_every_epochs < 0:
+            raise ValueError("`checkpoint_every_epochs` must be non-negative.")
