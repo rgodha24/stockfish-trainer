@@ -65,8 +65,10 @@
 
             if [ -d "/run/opengl-driver/lib" ]; then
               export LD_LIBRARY_PATH=$CUDA_PATH/lib:${cudaPackages.cuda_nvrtc.lib}/lib:/run/opengl-driver/lib:${stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH
+              export TRITON_LIBCUDA_PATH=/run/opengl-driver/lib
             else
               export LD_LIBRARY_PATH=$CUDA_PATH/lib:${cudaPackages.cuda_nvrtc.lib}/lib:${stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH
+              export TRITON_LIBCUDA_PATH=$CUDA_PATH/lib
             fi
 
             export PATH=$CUDA_PATH/bin:$PATH

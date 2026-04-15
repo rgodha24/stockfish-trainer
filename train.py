@@ -108,6 +108,8 @@ def main() -> None:
         L1=args.l1, L2=args.l2, L3=args.l3, layer_stacks=args.layer_stacks
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
+    setattr(torch._dynamo.config, "cache_size_limit", 32)
+    compiled_model = torch.compile(model, backend=args.compile_backend)
 
     optimizer = __import__("ranger22").Ranger22(
         model.parameters(),
@@ -183,7 +185,7 @@ def main() -> None:
 
             optimizer.zero_grad(set_to_none=True)
             scorenet = (
-                model(
+                compiled_model(
                     us,
                     them,
                     white_indices,
@@ -213,10 +215,6 @@ def main() -> None:
                     flush=True,
                 )
 
-            wandb.log(
-                {"train/loss_step": loss_value, "train/epoch": epoch}, step=global_step
-            )
-
         scheduler.step()
         epoch_loss = epoch_loss_sum / max(1, num_batches)
         elapsed = time.time() - epoch_start
@@ -227,6 +225,7 @@ def main() -> None:
         )
         wandb.log(
             {
+                "train/epoch": epoch,
                 "train/loss_epoch": epoch_loss,
                 "train/lr": lr,
                 "train/epoch_time_sec": elapsed,

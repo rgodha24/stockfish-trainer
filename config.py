@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 import tyro
 from tyro.conf import Positional
@@ -47,6 +47,8 @@ class TrainingConfig:
     default_root_dir: str = "logs"
     wandb_project: str = "stockfish-trainer"
     wandb_run_name: str | None = None
+
+    compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
 
     def __post_init__(self):
         if not self.datasets:

@@ -15,6 +15,8 @@ dependencies = [
   "numpy<2.0",
   "wandb",
   "ranger22",
+  "cupy-cuda13x<14",
+  "apache-tvm-ffi==0.1.9",
   "tilelang==0.1.8",
 ]
 

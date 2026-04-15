@@ -52,21 +52,7 @@ class RustSparseBatchProvider:
                 cpu_count = os.cpu_count() or 8
             total_threads = max(1, cpu_count - 1)
 
-        skip_heavy = (
-            config.filtered
-            or config.wld_filtered
-            or config.random_fen_skipping > 0
-            or config.early_fen_skipping >= 0
-            or (
-                config.simple_eval_skipping is not None
-                and config.simple_eval_skipping > 0
-            )
-        )
-
-        if skip_heavy:
-            decode_threads = max(1, (total_threads * 9) // 10)
-        else:
-            decode_threads = max(1, total_threads // 4)
+        decode_threads = max(1, (total_threads * 9) // 10)
         encode_threads = max(1, total_threads - decode_threads)
         slab_count = max(8, encode_threads + max(4, encode_threads // 2))
 
