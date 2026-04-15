@@ -33,7 +33,8 @@ class PackedChunkDataset(torch.utils.data.IterableDataset):
         filenames: list[str],
         chunk_entries: int,
         cyclic: bool,
-        loader_threads: int,
+        total_threads: int,
+        decode_threads: int,
         config: DataloaderSkipConfig,
         rank: int | None = None,
         world_size: int | None = None,
@@ -42,24 +43,16 @@ class PackedChunkDataset(torch.utils.data.IterableDataset):
         self.filenames = list(filenames)
         self.chunk_entries = int(chunk_entries)
         self.cyclic = bool(cyclic)
-        self.loader_threads = int(loader_threads)
+        self.total_threads = int(total_threads)
+        self.decode_threads = int(decode_threads)
         self.config = config
         self.rank, self.world_size = _infer_world(rank, world_size)
-
-    def _total_threads(self) -> int:
-        if self.loader_threads > 0:
-            return self.loader_threads
-        try:
-            cpu_count = len(os.sched_getaffinity(0))
-        except (AttributeError, OSError):
-            cpu_count = os.cpu_count() or 8
-        return max(1, cpu_count - 1)
 
     def __iter__(self):
         stream = rust.PackedEntryStream(
             list(self.filenames),
-            total_threads=self._total_threads(),
-            decode_threads=None,
+            total_threads=self.total_threads,
+            decode_threads=self.decode_threads,
             chunk_entries=self.chunk_entries,
             shuffle_buffer_entries=16384,
             seed=None,
@@ -93,18 +86,20 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
         chunk_dataset: PackedChunkDataset,
         batch_size: int,
         chunk_entries: int,
-        max_batches: int | None = None,
+        encode_threads: int,
     ):
         super().__init__()
         self.feature_set = feature_set.replace("^", "")
         self.chunk_dataset = chunk_dataset
         self.batch_size = int(batch_size)
         self.chunk_entries = int(chunk_entries)
-        self.max_batches = max_batches
+        self.encode_threads = int(encode_threads)
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if self.chunk_entries <= 0:
             raise ValueError("chunk_entries must be positive")
+        if self.encode_threads <= 0:
+            raise ValueError("encode_threads must be positive")
         if self.batch_size % self.chunk_entries != 0:
             raise ValueError("batch_size must be divisible by chunk_entries")
         self.chunks_per_batch = self.batch_size // self.chunk_entries
@@ -112,10 +107,7 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         chunk_iter = iter(self.chunk_dataset)
-        yielded = 0
         while True:
-            if self.max_batches is not None and yielded >= self.max_batches:
-                return
             chunks: list[bytes] = []
             for _ in range(self.chunks_per_batch):
                 try:
@@ -123,14 +115,13 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
                 except StopIteration:
                     return
 
-            batch = rust.encode_packed_chunks(self.feature_set, chunks, self.batch_size)
-            yielded += 1
+            batch = rust.encode_packed_chunks(
+                self.feature_set,
+                chunks,
+                self.batch_size,
+                self.encode_threads,
+            )
             yield self._batch_to_tuple(batch)
-
-    def __len__(self):
-        if self.max_batches is None:
-            raise TypeError("dataset length is undefined without max_batches")
-        return self.max_batches
 
     def _batch_to_tuple(self, batch):
         us = torch.from_numpy(batch["is_white"])
@@ -148,7 +139,12 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
             or self._ones_buffer.shape[1] != cols
             or self._ones_buffer.shape[0] < rows
         ):
-            self._ones_buffer = torch.ones((rows, cols), dtype=torch.float32)
+            ones = torch.ones((rows, cols), dtype=torch.float32)
+            try:
+                ones = ones.pin_memory()
+            except RuntimeError:
+                pass
+            self._ones_buffer = ones
         values = self._ones_buffer[:rows]
 
         return (
@@ -175,13 +171,24 @@ def make_sparse_batch_dataset(
     chunk_entries: int = 8192,
     rank: int | None = None,
     world_size: int | None = None,
-    max_batches: int | None = None,
+    encode_threads: int = 0,
 ) -> EncodedBatchDataset:
+    total_threads = _resolve_total_threads(loader_threads)
+    decode_threads, default_encode_threads = _default_thread_split(
+        total_threads, config
+    )
+    if encode_threads > 0:
+        chosen_encode_threads = max(1, encode_threads)
+        decode_threads = max(1, total_threads - chosen_encode_threads)
+    else:
+        chosen_encode_threads = default_encode_threads
+
     chunk_dataset = PackedChunkDataset(
         filenames=filenames,
         chunk_entries=chunk_entries,
         cyclic=cyclic,
-        loader_threads=loader_threads,
+        total_threads=total_threads,
+        decode_threads=decode_threads,
         config=config,
         rank=rank,
         world_size=world_size,
@@ -191,5 +198,39 @@ def make_sparse_batch_dataset(
         chunk_dataset=chunk_dataset,
         batch_size=batch_size,
         chunk_entries=chunk_entries,
-        max_batches=max_batches,
+        encode_threads=chosen_encode_threads,
     )
+
+
+def _resolve_total_threads(loader_threads: int) -> int:
+    if loader_threads > 0:
+        return loader_threads
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpu_count = os.cpu_count() or 8
+    return max(1, cpu_count - 1)
+
+
+def _default_thread_split(
+    total_threads: int,
+    config: DataloaderSkipConfig,
+) -> tuple[int, int]:
+    skip_heavy = (
+        config.filtered
+        or config.wld_filtered
+        or config.random_fen_skipping > 0
+        or config.early_fen_skipping >= 0
+        or config.simple_eval_skipping > 0
+    )
+    if total_threads <= 1:
+        return 1, 1
+
+    if skip_heavy:
+        decode_threads = max(1, (total_threads * 3) // 4)
+        encode_threads = max(1, total_threads - decode_threads)
+        return decode_threads, encode_threads
+
+    decode_threads = max(1, min(8, total_threads // 4))
+    encode_threads = max(1, total_threads - decode_threads)
+    return decode_threads, encode_threads

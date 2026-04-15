@@ -11,6 +11,7 @@ use std::time::Duration;
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use sfbinpack::chess::{
     bitboard::Bitboard,
     castling_rights::CastlingRights,
@@ -461,6 +462,7 @@ pub fn encode_packed_chunks(
     feature_set: &FeatureSet,
     chunks: &[Vec<u8>],
     batch_size: usize,
+    encode_threads: usize,
 ) -> Result<EncodedBatch, PipelineError> {
     if batch_size == 0 {
         return Err(PipelineError::new("batch_size must be greater than zero"));
@@ -482,13 +484,63 @@ pub fn encode_packed_chunks(
         )));
     }
 
-    let mut batch = EncodedBatch::new(batch_size, feature_set);
+    let mut packed_entries = Vec::with_capacity(total_entries);
     for chunk in chunks {
-        for packed in chunk.chunks_exact(PACKED_ENTRY_BYTES) {
-            let entry = unpack_training_entry(packed)?;
-            batch.push_entry(&entry, feature_set)?;
-        }
+        packed_entries.extend(chunk.chunks_exact(PACKED_ENTRY_BYTES).map(|packed| {
+            let mut fixed = [0u8; PACKED_ENTRY_BYTES];
+            fixed.copy_from_slice(packed);
+            fixed
+        }));
     }
+
+    let max_active_features = feature_set.max_active_features();
+    let threads = encode_threads.max(1);
+    let encoded_rows = if threads == 1 {
+        packed_entries
+            .iter()
+            .map(|packed| {
+                let entry = unpack_training_entry(packed)?;
+                let mut white = vec![-1; max_active_features];
+                let mut black = vec![-1; max_active_features];
+                let metadata =
+                    encode_training_entry_indices_only(&entry, feature_set, &mut white, &mut black);
+                Ok::<_, PipelineError>((metadata, white, black))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|error| PipelineError::new(format!("failed to build encode pool: {error}")))?;
+        thread_pool.install(|| {
+            packed_entries
+                .par_iter()
+                .map(|packed| {
+                    let entry = unpack_training_entry(packed)?;
+                    let mut white = vec![-1; max_active_features];
+                    let mut black = vec![-1; max_active_features];
+                    let metadata = encode_training_entry_indices_only(
+                        &entry,
+                        feature_set,
+                        &mut white,
+                        &mut black,
+                    );
+                    Ok::<_, PipelineError>((metadata, white, black))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let mut batch = EncodedBatch::new(batch_size, feature_set);
+    for (row, row_data) in encoded_rows.into_iter().enumerate() {
+        let (metadata, white, black) = row_data?;
+        let start = row * max_active_features;
+        let end = start + max_active_features;
+        batch.white[start..end].copy_from_slice(&white);
+        batch.black[start..end].copy_from_slice(&black);
+        batch.write_metadata(row, metadata);
+    }
+    batch.size = batch_size;
 
     Ok(batch)
 }
@@ -1589,7 +1641,7 @@ mod tests {
             chunk1.extend_from_slice(&pack_training_entry(entry));
         }
 
-        let batch = encode_packed_chunks(&feature_set, &[chunk0, chunk1], 16).unwrap();
+        let batch = encode_packed_chunks(&feature_set, &[chunk0, chunk1], 16, 1).unwrap();
         assert_eq!(batch.len(), 16);
         assert_eq!(
             batch.white_flat_slice().len(),
@@ -1632,7 +1684,7 @@ mod tests {
 
         for feature_name in ["HalfKAv2_hm", "Full_Threats", "Full_Threats+HalfKAv2_hm"] {
             let feature_set = FeatureSet::from_str(feature_name).unwrap();
-            let actual = encode_packed_chunks(&feature_set, &chunks, entries.len()).unwrap();
+            let actual = encode_packed_chunks(&feature_set, &chunks, entries.len(), 1).unwrap();
             let expected = encode_entries_direct(&feature_set, &entries);
             assert_batches_equal(&actual, &expected);
         }
@@ -1660,7 +1712,8 @@ mod tests {
             first_batch_chunks.push(stream.next_chunk().unwrap().unwrap());
         }
 
-        let actual = encode_packed_chunks(&feature_set, &first_batch_chunks, batch_size).unwrap();
+        let actual =
+            encode_packed_chunks(&feature_set, &first_batch_chunks, batch_size, 1).unwrap();
         let expected = encode_entries_direct(&feature_set, &entries[..batch_size]);
         assert_batches_equal(&actual, &expected);
         let _ = fs::remove_file(file);
@@ -1705,7 +1758,8 @@ mod tests {
         for feature_name in ["HalfKAv2_hm", "Full_Threats", "Full_Threats+HalfKAv2_hm"] {
             let feature_set = FeatureSet::from_str(feature_name).unwrap();
             for (batch_index, chunk_group) in chunk_groups.iter().enumerate() {
-                let actual = encode_packed_chunks(&feature_set, chunk_group, batch_size).unwrap();
+                let actual =
+                    encode_packed_chunks(&feature_set, chunk_group, batch_size, 1).unwrap();
                 let start = batch_index * batch_size;
                 let end = start + batch_size;
                 let expected = encode_entries_direct(&feature_set, &entries[start..end]);

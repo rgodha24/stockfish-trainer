@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use numpy::ndarray::{ArrayView1, ArrayView2};
-use numpy::IntoPyArray;
+use numpy::{PyArray1, PyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -17,6 +17,11 @@ use crate::pipeline::{
 #[pyclass(name = "PackedEntryStream")]
 pub struct PyPackedEntryStream {
     stream: Mutex<Option<PackedEntryStream>>,
+}
+
+#[pyclass]
+struct PyEncodedBatchOwner {
+    batch: EncodedBatch,
 }
 
 #[pymethods]
@@ -154,12 +159,13 @@ fn encode_packed_chunks_py<'py>(
     feature_set: &str,
     chunks: Vec<Vec<u8>>,
     batch_size: usize,
+    encode_threads: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let feature_set = FeatureSet::from_str(feature_set)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let batch =
-        encode_packed_chunks(&feature_set, &chunks, batch_size).map_err(to_py_runtime_error)?;
-    batch_to_pydict(py, &batch)
+    let batch = encode_packed_chunks(&feature_set, &chunks, batch_size, encode_threads)
+        .map_err(to_py_runtime_error)?;
+    batch_to_pydict(py, batch)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -168,7 +174,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn batch_to_pydict<'py>(py: Python<'py>, batch: &EncodedBatch) -> PyResult<Bound<'py, PyDict>> {
+fn batch_to_pydict<'py>(py: Python<'py>, batch: EncodedBatch) -> PyResult<Bound<'py, PyDict>> {
+    let owner = Py::new(py, PyEncodedBatchOwner { batch })?;
+    let owner_bound = owner.bind(py);
+    let owner_ref = owner_bound.borrow();
+    let batch = &owner_ref.batch;
     let rows = batch.len();
     let cols = batch.max_active_features();
 
@@ -185,13 +195,18 @@ fn batch_to_pydict<'py>(py: Python<'py>, batch: &EncodedBatch) -> PyResult<Bound
     let psqt_indices_view = ArrayView1::from(batch.psqt_indices_slice());
     let layer_stack_indices_view = ArrayView1::from(batch.layer_stack_indices_slice());
 
-    let is_white = is_white_view.to_owned().into_pyarray(py);
-    let outcome = outcome_view.to_owned().into_pyarray(py);
-    let score = score_view.to_owned().into_pyarray(py);
-    let white = white_view.to_owned().into_pyarray(py);
-    let black = black_view.to_owned().into_pyarray(py);
-    let psqt_indices = psqt_indices_view.to_owned().into_pyarray(py);
-    let layer_stack_indices = layer_stack_indices_view.to_owned().into_pyarray(py);
+    let is_white =
+        unsafe { PyArray2::borrow_from_array(&is_white_view, owner_bound.clone().into_any()) };
+    let outcome =
+        unsafe { PyArray2::borrow_from_array(&outcome_view, owner_bound.clone().into_any()) };
+    let score = unsafe { PyArray2::borrow_from_array(&score_view, owner_bound.clone().into_any()) };
+    let white = unsafe { PyArray2::borrow_from_array(&white_view, owner_bound.clone().into_any()) };
+    let black = unsafe { PyArray2::borrow_from_array(&black_view, owner_bound.clone().into_any()) };
+    let psqt_indices =
+        unsafe { PyArray1::borrow_from_array(&psqt_indices_view, owner_bound.clone().into_any()) };
+    let layer_stack_indices = unsafe {
+        PyArray1::borrow_from_array(&layer_stack_indices_view, owner_bound.clone().into_any())
+    };
 
     let dict = PyDict::new(py);
     dict.set_item("num_inputs", batch.num_inputs())?;

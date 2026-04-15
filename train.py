@@ -41,14 +41,19 @@ def make_train_loader(args: TrainingConfig) -> DataLoader:
         loader_threads=args.loader_threads,
         config=skip_cfg,
         chunk_entries=args.chunk_entries,
-        max_batches=num_batches_for_size(args.epoch_size, args.batch_size),
+        encode_threads=args.encode_threads,
+    )
+    prefetch_factor = (
+        None if args.data_loader_workers == 0 else args.data_loader_queue_size
     )
     return DataLoader(
         stream,
         batch_size=None,
         batch_sampler=None,
-        num_workers=0,
+        num_workers=args.data_loader_workers,
         pin_memory=args.pin_memory,
+        persistent_workers=args.data_loader_workers > 0,
+        prefetch_factor=prefetch_factor,
     )
 
 
@@ -140,9 +145,11 @@ def main() -> None:
         model.train()
         epoch_loss_sum = 0.0
         epoch_start = time.time()
-        num_batches = len(train_loader)
+        num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
 
         for batch_idx, batch in enumerate(train_loader):
+            if batch_idx >= num_batches:
+                break
             if batch_idx == 0:
                 model.clip_input_weights()
             model.clip_weights()

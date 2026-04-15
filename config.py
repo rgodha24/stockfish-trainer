@@ -40,7 +40,9 @@ class TrainingConfig:
 
     epoch_size: int = 100_000_000
     loader_threads: int = -1
+    encode_threads: int = 0
     chunk_entries: int = 8192
+    data_loader_workers: int = 0
     pin_memory: bool = True
     data_loader_queue_size: int = 16
 
@@ -62,3 +64,7 @@ class TrainingConfig:
             raise ValueError("Argument `chunk_entries` must be positive.")
         if self.batch_size % self.chunk_entries != 0:
             raise ValueError("`batch_size` must be divisible by `chunk_entries`.")
+        if self.data_loader_workers < 0:
+            raise ValueError("`data_loader_workers` must be non-negative.")
+        if self.encode_threads < 0:
+            raise ValueError("`encode_threads` must be non-negative.")
