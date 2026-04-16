@@ -60,12 +60,21 @@ DECODE_THREADS=${DECODE_THREADS:--1}
 ENCODE_THREADS=${ENCODE_THREADS:-1}
 SHUFFLE_BUFFER_ENTRIES=${SHUFFLE_BUFFER_ENTRIES:-16384}
 
+HEAD_PID=""
+WORKER_SRUN_PIDS=()
+
 cleanup() {
-  srun --het-group=0 --nodes=1 --ntasks=1 --nodelist="${HEAD_NODE}" \
-    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true" || true
+  uv run --no-sync ray stop --force >/dev/null 2>&1 || true
   for NODE in "${WORKER_NODES[@]}"; do
     srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
       bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true" || true
+  done
+
+  if [[ -n "${HEAD_PID}" ]]; then
+    kill "${HEAD_PID}" >/dev/null 2>&1 || true
+  fi
+  for PID in "${WORKER_SRUN_PIDS[@]}"; do
+    kill "${PID}" >/dev/null 2>&1 || true
   done
 }
 
@@ -78,8 +87,9 @@ echo "ray head ip: ${HEAD_IP}"
 echo "ray address: ${RAY_ADDRESS}"
 echo "datasets: ${DATASETS[*]}"
 
-srun --het-group=0 --nodes=1 --ntasks=1 --nodelist="${HEAD_NODE}" \
-  bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; timeout ${RAY_START_TIMEOUT} uv run --no-sync ray start --head --node-ip-address=${HEAD_IP} --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=0 --disable-usage-stats" &
+uv run --no-sync ray stop --force >/dev/null 2>&1 || true
+uv run --no-sync ray start --head --node-ip-address="${HEAD_IP}" --port="${RAY_PORT}" --dashboard-port="${RAY_DASHBOARD_PORT}" --num-cpus=0 --disable-usage-stats --block &
+HEAD_PID=$!
 
 sleep 4
 
@@ -90,9 +100,32 @@ for NODE in "${WORKER_NODES[@]}"; do
   fi
   echo "starting worker ${NODE} (${NODE_IP})"
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
-    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; timeout ${RAY_START_TIMEOUT} uv run --no-sync ray start --address=${RAY_ADDRESS} --node-ip-address=${NODE_IP} --num-cpus=16 --disable-usage-stats" &
+    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; uv run --no-sync ray start --address=${RAY_ADDRESS} --node-ip-address=${NODE_IP} --num-cpus=16 --disable-usage-stats --block" &
+  WORKER_SRUN_PIDS+=("$!")
 done
-wait
+
+READY=0
+for _ in $(seq 1 30); do
+  if uv run --no-sync python - <<PY
+import ray
+
+ray.init(address="${RAY_ADDRESS}", log_to_driver=False)
+cpu = float(ray.cluster_resources().get("CPU", 0.0))
+ray.shutdown()
+raise SystemExit(0 if cpu >= (${FEEDER_COUNT} * ${FEEDER_CPUS}) else 2)
+PY
+  then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+
+if [[ "${READY}" -ne 1 ]]; then
+  echo "ray cluster did not become ready with enough worker CPU"
+  uv run --no-sync ray status --address "${RAY_ADDRESS}" || true
+  exit 1
+fi
 
 uv run --no-sync ray status --address "${RAY_ADDRESS}" || true
 

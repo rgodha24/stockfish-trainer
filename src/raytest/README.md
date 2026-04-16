@@ -52,7 +52,7 @@ Default hetjob shape in the script:
 - Group 0: 1 head node, 4 CPUs
 - Group 1: 2 worker nodes, 16 CPUs each
 
-The script starts Ray with `uv run ray ...` on all nodes.
+The script starts Ray with `uv run ray ...` on all nodes and keeps all daemons attached with `--block` so Slurm does not tear them down early.
 
 Note: the launcher resolves hostnames to IPv4 addresses and uses IPs for `--address` / `--node-ip-address` to avoid GCS hostname resolution issues.
 
