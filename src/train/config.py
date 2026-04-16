@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Annotated, Literal
+
+import tyro
+from tyro.conf import Positional
+
+from src.data import DataloaderSkipConfig
+
+
+@dataclass(kw_only=True)
+class BaseTrainingConfig:
+    datasets: Positional[tuple[str, ...]] = ()
+    max_epochs: int = 800
+    batch_size: int = 16384
+    features: str = "Full_Threats+HalfKAv2_hm^"
+
+    l1: int = 1024
+    l2: int = 31
+    l3: int = 32
+    layer_stacks: bool = True
+
+    lr: float = 8.75e-4
+    gamma: float = 0.992
+
+    in_offset: float = 270.0
+    out_offset: float = 270.0
+    in_scaling: float = 340.0
+    out_scaling: float = 380.0
+    pow_exp: float = 2.5
+    qp_asymmetry: float = 0.0
+    w1: float = 0.0
+    w2: float = 0.5
+    lambda_: Annotated[float, tyro.conf.arg(name="lambda")] = 1.0
+    start_lambda: float | None = None
+    end_lambda: float | None = None
+
+    random_fen_skipping: int = 0
+    early_fen_skipping: int = -1
+    simple_eval_skipping: int = -1
+    filtered: bool = True
+    wld_filtered: bool = True
+    param_index: int = 0
+    pc_y1: float = 1.0
+    pc_y2: float = 2.0
+    pc_y3: float = 1.0
+
+    epoch_size: int = 100_000_000
+    loader_threads: int = -1
+    encode_threads: int = 0
+    chunk_entries: int = 8192
+    shuffle_buffer_entries: int = 16384
+    pin_memory: bool = True
+
+    seed: int = 42
+    default_root_dir: str = "logs"
+    checkpoint_every_epochs: int = 10
+    wandb_project: str = "stockfish-trainer"
+    wandb_run_name: str | None = None
+    compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
+    resume_from_checkpoint: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.datasets:
+            raise ValueError("Argument `datasets` is required.")
+        if self.max_epochs <= 0 or self.epoch_size <= 0 or self.batch_size <= 0:
+            raise ValueError(
+                "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."
+            )
+        if self.chunk_entries <= 0:
+            raise ValueError("Argument `chunk_entries` must be positive.")
+        if self.batch_size % self.chunk_entries != 0:
+            raise ValueError("`batch_size` must be divisible by `chunk_entries`.")
+        if self.encode_threads < 0:
+            raise ValueError("`encode_threads` must be non-negative.")
+        if self.shuffle_buffer_entries < 0:
+            raise ValueError("`shuffle_buffer_entries` must be non-negative.")
+        if self.checkpoint_every_epochs < 0:
+            raise ValueError("`checkpoint_every_epochs` must be non-negative.")
+
+    def loader_skip_config(self) -> DataloaderSkipConfig:
+        return DataloaderSkipConfig(
+            filtered=self.filtered,
+            wld_filtered=self.wld_filtered,
+            random_fen_skipping=self.random_fen_skipping,
+            early_fen_skipping=self.early_fen_skipping,
+            simple_eval_skipping=self.simple_eval_skipping,
+            param_index=self.param_index,
+            pc_y1=self.pc_y1,
+            pc_y2=self.pc_y2,
+            pc_y3=self.pc_y3,
+        )
+
+
+@dataclass(kw_only=True)
+class SingleNodeTrainingConfig(BaseTrainingConfig):
+    data_loader_workers: int = 0
+    data_loader_queue_size: int = 16
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.data_loader_workers < 0:
+            raise ValueError("`data_loader_workers` must be non-negative.")
+        if self.data_loader_queue_size <= 0:
+            raise ValueError("`data_loader_queue_size` must be positive.")
+
+
+@dataclass(kw_only=True)
+class MultiNodeTrainingConfig(BaseTrainingConfig):
+    ray_address: str | None = None
+    ray_namespace: str = "stockfish-trainer"
+    ray_log_to_driver: bool = True
+
+    feeder_count: int = 4
+    feeder_cpus: float = 1.0
+    decode_threads: int = -1
+    bundle_chunks: int = 1
+    inflight_per_feeder: int = 1
+    report_interval_sec: float = 30.0
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.feeder_count <= 0:
+            raise ValueError("`feeder_count` must be positive.")
+        if self.feeder_cpus <= 0:
+            raise ValueError("`feeder_cpus` must be positive.")
+        if self.decode_threads == 0:
+            raise ValueError("`decode_threads` must be positive or -1 for auto.")
+        if self.bundle_chunks <= 0:
+            raise ValueError("`bundle_chunks` must be positive.")
+        if self.inflight_per_feeder <= 0:
+            raise ValueError("`inflight_per_feeder` must be positive.")
+        if self.report_interval_sec <= 0:
+            raise ValueError("`report_interval_sec` must be positive.")
+
+    def distributed_loader_config(self):
+        from src.distributed import DistributedLoaderConfig
+
+        return DistributedLoaderConfig(
+            datasets=self.datasets,
+            feature_set=self.features,
+            batch_size=self.batch_size,
+            chunk_entries=self.chunk_entries,
+            feeder_count=self.feeder_count,
+            cyclic=True,
+            loader_threads=self.loader_threads,
+            decode_threads=self.decode_threads,
+            encode_threads=self.encode_threads,
+            shuffle_buffer_entries=self.shuffle_buffer_entries,
+            filtered=self.filtered,
+            wld_filtered=self.wld_filtered,
+            random_fen_skipping=self.random_fen_skipping,
+            early_fen_skipping=self.early_fen_skipping,
+            simple_eval_skipping=self.simple_eval_skipping,
+            param_index=self.param_index,
+            pc_y1=self.pc_y1,
+            pc_y2=self.pc_y2,
+            pc_y3=self.pc_y3,
+            seed=self.seed,
+            ray_address=self.ray_address,
+            ray_namespace=self.ray_namespace,
+            log_to_driver=self.ray_log_to_driver,
+            feeder_cpus=self.feeder_cpus,
+            bundle_chunks=self.bundle_chunks,
+            inflight_per_feeder=self.inflight_per_feeder,
+            report_interval_sec=self.report_interval_sec,
+            pin_memory=self.pin_memory,
+        )
+
+
+TrainingConfig = SingleNodeTrainingConfig

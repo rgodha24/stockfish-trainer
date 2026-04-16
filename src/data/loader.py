@@ -6,6 +6,9 @@ import torch
 import rust
 
 
+PACKED_ENTRY_BYTES = 32
+
+
 @dataclass
 class DataloaderSkipConfig:
     filtered: bool = True
@@ -27,11 +30,116 @@ def _infer_world(rank: int | None, world_size: int | None) -> tuple[int, int]:
     return rank, world_size
 
 
+def resolve_total_threads(loader_threads: int) -> int:
+    if loader_threads > 0:
+        return loader_threads
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpu_count = os.cpu_count() or 8
+    return max(1, cpu_count - 1)
+
+
+def default_thread_split(
+    total_threads: int,
+    config: DataloaderSkipConfig,
+) -> tuple[int, int]:
+    skip_heavy = (
+        config.filtered
+        or config.wld_filtered
+        or config.random_fen_skipping > 0
+        or config.early_fen_skipping >= 0
+        or config.simple_eval_skipping > 0
+    )
+    if total_threads <= 1:
+        return 1, 1
+
+    if skip_heavy:
+        decode_threads = max(1, (total_threads * 3) // 4)
+        encode_threads = max(1, total_threads - decode_threads)
+        return decode_threads, encode_threads
+
+    decode_threads = max(1, min(8, total_threads // 4))
+    encode_threads = max(1, total_threads - decode_threads)
+    return decode_threads, encode_threads
+
+
+def resolve_thread_split(
+    total_threads: int,
+    config: DataloaderSkipConfig,
+    encode_threads: int,
+) -> tuple[int, int]:
+    decode_threads, default_encode_threads = default_thread_split(total_threads, config)
+    if encode_threads > 0:
+        chosen_encode_threads = max(1, encode_threads)
+        decode_threads = max(1, total_threads - chosen_encode_threads)
+    else:
+        chosen_encode_threads = default_encode_threads
+    return decode_threads, chosen_encode_threads
+
+
+class SparseBatchTensorizer:
+    def __init__(self, *, pin_memory: bool = False):
+        self.pin_memory = pin_memory
+        self._ones_buffer: torch.Tensor | None = None
+
+    def _maybe_pin(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not self.pin_memory or not torch.cuda.is_available():
+            return tensor
+        try:
+            return tensor.pin_memory()
+        except RuntimeError:
+            return tensor
+
+    def _values_buffer(self, rows: int, cols: int) -> torch.Tensor:
+        if (
+            self._ones_buffer is None
+            or self._ones_buffer.shape[1] != cols
+            or self._ones_buffer.shape[0] < rows
+        ):
+            ones = torch.ones((rows, cols), dtype=torch.float32)
+            try:
+                ones = ones.pin_memory()
+            except RuntimeError:
+                pass
+            self._ones_buffer = ones
+        return self._ones_buffer[:rows]
+
+    def to_tuple(self, batch: dict[str, object]) -> tuple[torch.Tensor, ...]:
+        us = self._maybe_pin(torch.from_numpy(batch["is_white"]))
+        them = self._maybe_pin(1.0 - us)
+        white_indices = self._maybe_pin(torch.from_numpy(batch["white"]))
+        black_indices = self._maybe_pin(torch.from_numpy(batch["black"]))
+        outcome = self._maybe_pin(torch.from_numpy(batch["outcome"]))
+        score = self._maybe_pin(torch.from_numpy(batch["score"]))
+        psqt_indices = self._maybe_pin(torch.from_numpy(batch["psqt_indices"]))
+        layer_stack_indices = self._maybe_pin(
+            torch.from_numpy(batch["layer_stack_indices"])
+        )
+
+        rows, cols = white_indices.shape
+        values = self._values_buffer(rows, cols)
+
+        return (
+            us,
+            them,
+            white_indices,
+            values,
+            black_indices,
+            values,
+            outcome,
+            score,
+            psqt_indices,
+            layer_stack_indices,
+        )
+
+
 class PackedChunkDataset(torch.utils.data.IterableDataset):
     def __init__(
         self,
         filenames: list[str],
         chunk_entries: int,
+        shuffle_buffer_entries: int,
         cyclic: bool,
         total_threads: int,
         decode_threads: int,
@@ -42,6 +150,7 @@ class PackedChunkDataset(torch.utils.data.IterableDataset):
         super().__init__()
         self.filenames = list(filenames)
         self.chunk_entries = int(chunk_entries)
+        self.shuffle_buffer_entries = int(shuffle_buffer_entries)
         self.cyclic = bool(cyclic)
         self.total_threads = int(total_threads)
         self.decode_threads = int(decode_threads)
@@ -54,7 +163,7 @@ class PackedChunkDataset(torch.utils.data.IterableDataset):
             total_threads=self.total_threads,
             decode_threads=self.decode_threads,
             chunk_entries=self.chunk_entries,
-            shuffle_buffer_entries=16384,
+            shuffle_buffer_entries=self.shuffle_buffer_entries,
             seed=None,
             cyclic=self.cyclic,
             filtered=self.config.filtered,
@@ -103,7 +212,7 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
         if self.batch_size % self.chunk_entries != 0:
             raise ValueError("batch_size must be divisible by chunk_entries")
         self.chunks_per_batch = self.batch_size // self.chunk_entries
-        self._ones_buffer: torch.Tensor | None = None
+        self.tensorizer = SparseBatchTensorizer()
 
     def __iter__(self):
         chunk_iter = iter(self.chunk_dataset)
@@ -121,44 +230,7 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
                 self.batch_size,
                 self.encode_threads,
             )
-            yield self._batch_to_tuple(batch)
-
-    def _batch_to_tuple(self, batch):
-        us = torch.from_numpy(batch["is_white"])
-        them = 1.0 - us
-        white_indices = torch.from_numpy(batch["white"])
-        black_indices = torch.from_numpy(batch["black"])
-        outcome = torch.from_numpy(batch["outcome"])
-        score = torch.from_numpy(batch["score"])
-        psqt_indices = torch.from_numpy(batch["psqt_indices"])
-        layer_stack_indices = torch.from_numpy(batch["layer_stack_indices"])
-
-        rows, cols = white_indices.shape
-        if (
-            self._ones_buffer is None
-            or self._ones_buffer.shape[1] != cols
-            or self._ones_buffer.shape[0] < rows
-        ):
-            ones = torch.ones((rows, cols), dtype=torch.float32)
-            try:
-                ones = ones.pin_memory()
-            except RuntimeError:
-                pass
-            self._ones_buffer = ones
-        values = self._ones_buffer[:rows]
-
-        return (
-            us,
-            them,
-            white_indices,
-            values,
-            black_indices,
-            values,
-            outcome,
-            score,
-            psqt_indices,
-            layer_stack_indices,
-        )
+            yield self.tensorizer.to_tuple(batch)
 
 
 def make_sparse_batch_dataset(
@@ -169,23 +241,20 @@ def make_sparse_batch_dataset(
     loader_threads: int = -1,
     config: DataloaderSkipConfig = DataloaderSkipConfig(),
     chunk_entries: int = 8192,
+    shuffle_buffer_entries: int = 16384,
     rank: int | None = None,
     world_size: int | None = None,
     encode_threads: int = 0,
 ) -> EncodedBatchDataset:
-    total_threads = _resolve_total_threads(loader_threads)
-    decode_threads, default_encode_threads = _default_thread_split(
-        total_threads, config
+    total_threads = resolve_total_threads(loader_threads)
+    decode_threads, chosen_encode_threads = resolve_thread_split(
+        total_threads, config, encode_threads
     )
-    if encode_threads > 0:
-        chosen_encode_threads = max(1, encode_threads)
-        decode_threads = max(1, total_threads - chosen_encode_threads)
-    else:
-        chosen_encode_threads = default_encode_threads
 
     chunk_dataset = PackedChunkDataset(
         filenames=filenames,
         chunk_entries=chunk_entries,
+        shuffle_buffer_entries=shuffle_buffer_entries,
         cyclic=cyclic,
         total_threads=total_threads,
         decode_threads=decode_threads,
@@ -200,37 +269,3 @@ def make_sparse_batch_dataset(
         chunk_entries=chunk_entries,
         encode_threads=chosen_encode_threads,
     )
-
-
-def _resolve_total_threads(loader_threads: int) -> int:
-    if loader_threads > 0:
-        return loader_threads
-    try:
-        cpu_count = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        cpu_count = os.cpu_count() or 8
-    return max(1, cpu_count - 1)
-
-
-def _default_thread_split(
-    total_threads: int,
-    config: DataloaderSkipConfig,
-) -> tuple[int, int]:
-    skip_heavy = (
-        config.filtered
-        or config.wld_filtered
-        or config.random_fen_skipping > 0
-        or config.early_fen_skipping >= 0
-        or config.simple_eval_skipping > 0
-    )
-    if total_threads <= 1:
-        return 1, 1
-
-    if skip_heavy:
-        decode_threads = max(1, (total_threads * 3) // 4)
-        encode_threads = max(1, total_threads - decode_threads)
-        return decode_threads, encode_threads
-
-    decode_threads = max(1, min(8, total_threads // 4))
-    encode_threads = max(1, total_threads - decode_threads)
-    return decode_threads, encode_threads

@@ -12,7 +12,9 @@ https://github.com/vondele/nettest/blob/94da8f63ff49a53a24a072c4205187f4a7e78e94
 the ghfs skill is very useful here
 
 layout:
-train.py is in cwd.
+src/train/singlenode.py is the local single-node trainer entrypoint.
+src/train/multinode.py is the Ray-backed trainer entrypoint.
 src/rust/ contains loader code (in rust)
 src/model/ contains model related code (eg kernels etc too)
 src/data/ contains more loader code. mostly just thin wrappers around rust code. eventually networking stuff
+src/distributed/ contains Ray/distributed loader code and smoke-test tooling
