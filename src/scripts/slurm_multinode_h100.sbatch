@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=dist-train
-#SBATCH --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:H100:1 --cpus-per-task=8 --time=03:00:00
+#SBATCH --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:rtx_pro_6000_blackwell:1 --cpus-per-task=8 --time=03:00:00
 #SBATCH --output=dist-train-%j.out
 #SBATCH hetjob
 #SBATCH --nodes=10 --ntasks=10 --ntasks-per-node=1 --cpus-per-task=16
