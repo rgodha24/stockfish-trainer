@@ -49,10 +49,9 @@ until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); asse
   --feeder-count 10 \
   --feeder-cpus 16 \
   --loader-threads 16 \
-  --encode-threads 4 \
+  --encode-threads 6 \
   --batch-size 65536 \
   --chunk-entries 8192 \
-  --bundle-chunks 8 \
   --inflight-per-feeder 4 \
   --target-batches 500 \
   --max-seconds 300 \

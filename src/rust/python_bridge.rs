@@ -10,8 +10,8 @@ use pyo3::types::{PyBytes, PyDict};
 
 use crate::feature_extraction::FeatureSet;
 use crate::pipeline::{
-    encode_packed_chunks, EncodedBatch, PackedEntryStream, PackedStreamConfig, PipelineError,
-    SkipConfig, PACKED_ENTRY_BYTES,
+    encode_packed_bytes, EncodedBatch, PackedEntryStream, PackedStreamConfig, PipelineError,
+    SkipConfig,
 };
 
 #[pyclass(name = "PackedEntryStream")]
@@ -139,7 +139,7 @@ impl PyPackedEntryStream {
     fn next_encoded_batch<'py>(
         &self,
         py: Python<'py>,
-        bundle_chunks: usize,
+        batch_size: usize,
         feature_set: &str,
         encode_threads: usize,
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
@@ -154,22 +154,10 @@ impl PyPackedEntryStream {
                     None => return Ok(None),
                 };
 
-                let expected_bytes = stream.chunk_entries * PACKED_ENTRY_BYTES;
-                let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(bundle_chunks);
-
-                while chunks.len() < bundle_chunks {
-                    match stream.next_chunk()? {
-                        None => return Ok(None),
-                        Some(chunk) => {
-                            if chunk.len() == expected_bytes {
-                                chunks.push(chunk);
-                            }
-                        }
-                    }
-                }
-
-                let batch_size = bundle_chunks * stream.chunk_entries;
-                encode_packed_chunks(&feature_set, &chunks, batch_size, encode_threads).map(Some)
+                let Some(packed) = stream.next_batch(batch_size)? else {
+                    return Ok(None);
+                };
+                encode_packed_bytes(&feature_set, &packed, batch_size, encode_threads).map(Some)
             });
 
         match result.map_err(to_py_runtime_error)? {
@@ -195,24 +183,8 @@ impl PyPackedEntryStream {
     }
 }
 
-#[pyfunction(name = "encode_packed_chunks")]
-fn encode_packed_chunks_py<'py>(
-    py: Python<'py>,
-    feature_set: &str,
-    chunks: Vec<Vec<u8>>,
-    batch_size: usize,
-    encode_threads: usize,
-) -> PyResult<Bound<'py, PyDict>> {
-    let feature_set = FeatureSet::from_str(feature_set)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let batch = encode_packed_chunks(&feature_set, &chunks, batch_size, encode_threads)
-        .map_err(to_py_runtime_error)?;
-    batch_to_pydict(py, batch)
-}
-
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPackedEntryStream>()?;
-    m.add_function(wrap_pyfunction!(encode_packed_chunks_py, m)?)?;
     Ok(())
 }
 

@@ -15,6 +15,7 @@ class PackedFeeder:
         *,
         filenames: list[str],
         feature_set: str,
+        batch_size: int,
         encode_threads: int,
         total_threads: int,
         decode_threads: int | None,
@@ -27,13 +28,13 @@ class PackedFeeder:
         world_size: int,
     ) -> None:
         self.feature_set = feature_set
+        self.batch_size = int(batch_size)
         self.encode_threads = encode_threads
-        self.chunk_entries = int(chunk_entries)
         self.stream = rust.PackedEntryStream(
             list(filenames),
             total_threads=total_threads,
             decode_threads=decode_threads,
-            chunk_entries=self.chunk_entries,
+            chunk_entries=int(chunk_entries),
             shuffle_buffer_entries=shuffle_buffer_entries,
             seed=seed,
             cyclic=cyclic,
@@ -53,21 +54,20 @@ class PackedFeeder:
         self.returned_batches = 0
         self.returned_entries = 0
 
-    def next_bundle(self, bundle_chunks: int) -> tuple[dict | None, int]:
+    def next_batch(self) -> tuple[dict | None, int]:
         if self.done:
             return None, 0
 
         encoded = self.stream.next_encoded_batch(
-            bundle_chunks, self.feature_set, self.encode_threads
+            self.batch_size, self.feature_set, self.encode_threads
         )
         if encoded is None:
             self.done = True
             return None, 0
 
-        entries = bundle_chunks * self.chunk_entries
         self.returned_batches += 1
-        self.returned_entries += entries
-        return encoded, entries
+        self.returned_entries += self.batch_size
+        return encoded, self.batch_size
 
     def stats(self) -> dict[str, Any]:
         return {

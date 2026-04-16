@@ -38,11 +38,10 @@ class RayBatchStream:
         self.closed = False
 
         print(
-            "starting distributed loader: feeders={} batch_size={} chunk_entries={} bundle_chunks={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
+            "starting distributed loader: feeders={} batch_size={} chunk_entries={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
                 cfg.feeder_count,
                 cfg.batch_size,
                 cfg.chunk_entries,
-                cfg.bundle_chunks,
                 cfg.inflight_per_feeder,
                 self.decode_threads,
                 cfg.encode_threads,
@@ -63,6 +62,7 @@ class RayBatchStream:
             actor = PackedFeeder.options(num_cpus=cfg.feeder_cpus).remote(
                 filenames=list(cfg.datasets),
                 feature_set=self.feature_set,
+                batch_size=cfg.batch_size,
                 encode_threads=cfg.encode_threads,
                 total_threads=self.total_threads,
                 decode_threads=self.decode_threads,
@@ -78,7 +78,7 @@ class RayBatchStream:
 
         for feeder_idx, actor in enumerate(self.actors):
             for _ in range(cfg.inflight_per_feeder):
-                ref = actor.next_bundle.remote(cfg.bundle_chunks)
+                ref = actor.next_batch.remote()
                 self.inflight[ref] = feeder_idx
 
         self.start_time = time.perf_counter()
@@ -93,7 +93,7 @@ class RayBatchStream:
         print(format_progress(self.snapshot()), flush=True)
         self.next_report_time = time.perf_counter() + self.cfg.report_interval_sec
 
-    def _wait_for_bundle(self) -> None:
+    def _wait_for_batch(self) -> None:
         wait_start = time.perf_counter()
         ready, _ = ray.wait(list(self.inflight.keys()), num_returns=1, timeout=1.0)
         self.counters.wait_sec += time.perf_counter() - wait_start
@@ -117,16 +117,14 @@ class RayBatchStream:
             )
             self.pending_batches.append(encoded)
 
-            next_ref = self.actors[feeder_idx].next_bundle.remote(
-                self.cfg.bundle_chunks
-            )
+            next_ref = self.actors[feeder_idx].next_batch.remote()
             self.inflight[next_ref] = feeder_idx
 
     def __next__(self):
         while not self.pending_batches:
             if not self.inflight:
                 raise StopIteration
-            self._wait_for_bundle()
+            self._wait_for_batch()
 
         batch = self.pending_batches.popleft()
         self.counters.encoded_batches += 1
