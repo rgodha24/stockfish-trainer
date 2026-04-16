@@ -16,20 +16,16 @@ WORKER_CPUS=16
 HEAD=$(scontrol show hostnames "$SLURM_JOB_NODELIST_HET_GROUP_0" | head -1)
 WORKERS=($(scontrol show hostnames "$SLURM_JOB_NODELIST_HET_GROUP_1"))
 
-# Prefer the IB (ib0) interface for Ray traffic — falls back to hostname DNS.
+# Use srun to ask each node for its ib0 IP directly.
 # Override IB_IFACE if your cluster uses a different name (ib1, hsn0, etc).
 IB_IFACE="${IB_IFACE:-ib0}"
-local_ib_ip() {
-  local ip
-  ip=$(ip addr show "$IB_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
-  [[ -n "$ip" ]] && echo "$ip" && return
-  hostname -I | awk '{print $1}'  # last-resort fallback
-}
+node_ib_ip() { srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="$1" \
+                 ip -4 -o addr show dev "$IB_IFACE" | awk '{print $4}' | cut -d/ -f1; }
 
-HEAD_IP=$(local_ib_ip)
+HEAD_IP=$(ip -4 -o addr show dev "$IB_IFACE" | awk '{print $4}' | cut -d/ -f1)
 RAY_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 ADDR="${HEAD_IP}:${RAY_PORT}"
-echo "Ray head: $HEAD_IP:$RAY_PORT (IB_IFACE=$IB_IFACE)"
+echo "Ray head: $HEAD_IP:$RAY_PORT (iface=$IB_IFACE)"
 EXPECTED_CPUS=$(( ${#WORKERS[@]} * WORKER_CPUS ))
 
 trap '"$RAY" stop --force &>/dev/null || true; for n in "${WORKERS[@]}"; do srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="$n" "$RAY" stop --force &>/dev/null & done; wait || true' EXIT
@@ -39,9 +35,11 @@ trap '"$RAY" stop --force &>/dev/null || true; for n in "${WORKERS[@]}"; do srun
 sleep 4
 
 for NODE in "${WORKERS[@]}"; do
+  NODE_IP=$(node_ib_ip "$NODE")
+  echo "worker $NODE: $NODE_IP"
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="$NODE" \
-    bash -lc 'IB_IFACE="$3"; ip=$(ip addr show "$IB_IFACE" 2>/dev/null | awk "/inet /{print \$2; exit}" | cut -d/ -f1); [[ -z "$ip" ]] && ip=$(hostname -I | awk "{print \$1}"); echo "worker $(hostname): $ip (iface=$IB_IFACE)"; "$0" start --block --address="$1" --node-ip-address="$ip" --num-cpus="$2" --disable-usage-stats || true' \
-    "$RAY" "$ADDR" "$WORKER_CPUS" "$IB_IFACE" &
+    bash -lc '"$0" start --block --address="$1" --node-ip-address="$2" --num-cpus="$3" --disable-usage-stats || true' \
+    "$RAY" "$ADDR" "$NODE_IP" "$WORKER_CPUS" &
 done
 
 until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); assert ray.cluster_resources().get('CPU', 0) >= $EXPECTED_CPUS; ray.shutdown()" >/dev/null 2>&1; do sleep 2; done
