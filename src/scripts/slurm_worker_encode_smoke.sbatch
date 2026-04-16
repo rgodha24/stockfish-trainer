@@ -40,7 +40,7 @@ sleep 4
 
 for NODE in "${WORKERS[@]}"; do
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="$NODE" \
-    bash -lc 'IB_IFACE="$4"; ip=$(ip addr show "$IB_IFACE" 2>/dev/null | awk "/inet /{print \$2; exit}" | cut -d/ -f1); [[ -z "$ip" ]] && ip=$(hostname -I | awk "{print \$1}"); echo "worker $(hostname): $ip"; "$0" start --block --address="$1" --node-ip-address="$ip" --num-cpus="$3" --disable-usage-stats || true' \
+    bash -lc 'IB_IFACE="$3"; ip=$(ip addr show "$IB_IFACE" 2>/dev/null | awk "/inet /{print \$2; exit}" | cut -d/ -f1); [[ -z "$ip" ]] && ip=$(hostname -I | awk "{print \$1}"); echo "worker $(hostname): $ip (iface=$IB_IFACE)"; "$0" start --block --address="$1" --node-ip-address="$ip" --num-cpus="$2" --disable-usage-stats || true' \
     "$RAY" "$ADDR" "$WORKER_CPUS" "$IB_IFACE" &
 done
 
