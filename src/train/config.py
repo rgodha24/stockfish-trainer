@@ -108,12 +108,13 @@ class SingleNodeTrainingConfig(BaseTrainingConfig):
 
 @dataclass(kw_only=True)
 class MultiNodeTrainingConfig(BaseTrainingConfig):
+    loader_threads: int = 16
     ray_address: str | None = None
     ray_namespace: str = "stockfish-trainer"
     ray_log_to_driver: bool = True
 
-    feeder_count: int = 4
-    feeder_cpus: float = 1.0
+    feeder_count: int = 6
+    feeder_cpus: float = 16.0
     decode_threads: int = -1
     bundle_chunks: int = 1
     inflight_per_feeder: int = 1

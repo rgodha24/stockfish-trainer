@@ -3,7 +3,7 @@
 #SBATCH --nodes=1 --ntasks=1 --ntasks-per-node=1 --gpus-per-task=1 --cpus-per-task=8 --time=12:00:00
 #SBATCH --output=dist-train-%j.out
 #SBATCH hetjob
-#SBATCH --nodes=2 --ntasks=2 --ntasks-per-node=1 --cpus-per-task=16
+#SBATCH --nodes=6 --ntasks=6 --ntasks-per-node=1 --cpus-per-task=16
 
 set -euo pipefail
 [[ "$#" -lt 1 ]] && { echo "usage: sbatch $0 <dataset.binpack> ... [trainer args]"; exit 1; }

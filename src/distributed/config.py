@@ -11,12 +11,12 @@ from src.data import DataloaderSkipConfig
 class DistributedLoaderConfig:
     datasets: Positional[tuple[str, ...]] = ()
     feature_set: str = "Full_Threats+HalfKAv2_hm^"
-    batch_size: int = 16384
+    batch_size: int = 65536
     chunk_entries: int = 8192
-    feeder_count: int = 4
+    feeder_count: int = 6
     cyclic: bool = True
 
-    loader_threads: int = -1
+    loader_threads: int = 16
     decode_threads: int = -1
     encode_threads: int = 1
     shuffle_buffer_entries: int = 16384
@@ -35,7 +35,7 @@ class DistributedLoaderConfig:
     ray_address: str | None = None
     ray_namespace: str = "stockfish-trainer"
     log_to_driver: bool = True
-    feeder_cpus: float = 1.0
+    feeder_cpus: float = 16.0
 
     bundle_chunks: int = 1
     inflight_per_feeder: int = 1
