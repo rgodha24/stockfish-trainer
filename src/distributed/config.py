@@ -37,7 +37,6 @@ class DistributedLoaderConfig:
     log_to_driver: bool = True
     feeder_cpus: float = 16.0
 
-    bundle_chunks: int = 8
     inflight_per_feeder: int = 4
     report_interval_sec: float = 5.0
     pin_memory: bool = True
@@ -55,10 +54,6 @@ class DistributedLoaderConfig:
             raise ValueError("`decode_threads` must be positive or -1 for auto.")
         if self.encode_threads <= 0:
             raise ValueError("`encode_threads` must be positive.")
-        if self.bundle_chunks <= 0:
-            raise ValueError("`bundle_chunks` must be positive.")
-        if self.bundle_chunks * self.chunk_entries != self.batch_size:
-            raise ValueError("`bundle_chunks * chunk_entries` must equal `batch_size`.")
         if self.inflight_per_feeder <= 0:
             raise ValueError("`inflight_per_feeder` must be positive.")
         if self.feeder_cpus <= 0:

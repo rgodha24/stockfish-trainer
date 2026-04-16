@@ -157,8 +157,8 @@ class PackedChunkDataset(torch.utils.data.IterableDataset):
         self.config = config
         self.rank, self.world_size = _infer_world(rank, world_size)
 
-    def __iter__(self):
-        stream = rust.PackedEntryStream(
+    def make_stream(self):
+        return rust.PackedEntryStream(
             list(self.filenames),
             total_threads=self.total_threads,
             decode_threads=self.decode_threads,
@@ -178,6 +178,9 @@ class PackedChunkDataset(torch.utils.data.IterableDataset):
             rank=self.rank,
             world_size=self.world_size,
         )
+
+    def __iter__(self):
+        stream = self.make_stream()
         try:
             while True:
                 chunk = stream.next_chunk()
@@ -194,43 +197,31 @@ class EncodedBatchDataset(torch.utils.data.IterableDataset):
         feature_set: str,
         chunk_dataset: PackedChunkDataset,
         batch_size: int,
-        chunk_entries: int,
         encode_threads: int,
     ):
         super().__init__()
         self.feature_set = feature_set.replace("^", "")
         self.chunk_dataset = chunk_dataset
         self.batch_size = int(batch_size)
-        self.chunk_entries = int(chunk_entries)
         self.encode_threads = int(encode_threads)
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.chunk_entries <= 0:
-            raise ValueError("chunk_entries must be positive")
         if self.encode_threads <= 0:
             raise ValueError("encode_threads must be positive")
-        if self.batch_size % self.chunk_entries != 0:
-            raise ValueError("batch_size must be divisible by chunk_entries")
-        self.chunks_per_batch = self.batch_size // self.chunk_entries
         self.tensorizer = SparseBatchTensorizer()
 
     def __iter__(self):
-        chunk_iter = iter(self.chunk_dataset)
-        while True:
-            chunks: list[bytes] = []
-            for _ in range(self.chunks_per_batch):
-                try:
-                    chunks.append(next(chunk_iter))
-                except StopIteration:
+        stream = self.chunk_dataset.make_stream()
+        try:
+            while True:
+                batch = stream.next_encoded_batch(
+                    self.batch_size, self.feature_set, self.encode_threads
+                )
+                if batch is None:
                     return
-
-            batch = rust.encode_packed_chunks(
-                self.feature_set,
-                chunks,
-                self.batch_size,
-                self.encode_threads,
-            )
-            yield self.tensorizer.to_tuple(batch)
+                yield self.tensorizer.to_tuple(batch)
+        finally:
+            stream.close()
 
 
 def make_sparse_batch_dataset(
@@ -266,6 +257,5 @@ def make_sparse_batch_dataset(
         feature_set=feature_set,
         chunk_dataset=chunk_dataset,
         batch_size=batch_size,
-        chunk_entries=chunk_entries,
         encode_threads=chosen_encode_threads,
     )

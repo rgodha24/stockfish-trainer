@@ -120,7 +120,6 @@ class MultiNodeTrainingConfig(BaseTrainingConfig):
     feeder_count: int = 10
     feeder_cpus: float = 16.0
     decode_threads: int = -1
-    bundle_chunks: int = 8
     inflight_per_feeder: int = 4
     report_interval_sec: float = 30.0
 
@@ -132,8 +131,6 @@ class MultiNodeTrainingConfig(BaseTrainingConfig):
             raise ValueError("`feeder_cpus` must be positive.")
         if self.decode_threads == 0:
             raise ValueError("`decode_threads` must be positive or -1 for auto.")
-        if self.bundle_chunks <= 0:
-            raise ValueError("`bundle_chunks` must be positive.")
         if self.inflight_per_feeder <= 0:
             raise ValueError("`inflight_per_feeder` must be positive.")
         if self.report_interval_sec <= 0:
@@ -167,7 +164,6 @@ class MultiNodeTrainingConfig(BaseTrainingConfig):
             ray_namespace=self.ray_namespace,
             log_to_driver=self.ray_log_to_driver,
             feeder_cpus=self.feeder_cpus,
-            bundle_chunks=self.bundle_chunks,
             inflight_per_feeder=self.inflight_per_feeder,
             report_interval_sec=self.report_interval_sec,
             pin_memory=self.pin_memory,

@@ -288,6 +288,37 @@ impl PackedEntryStream {
         })
     }
 
+    pub fn next_batch(&self, batch_entries: usize) -> Result<Option<Vec<u8>>, PipelineError> {
+        if batch_entries == 0 {
+            return Err(PipelineError::new("batch_entries must be greater than zero"));
+        }
+        if batch_entries % self.chunk_entries != 0 {
+            return Err(PipelineError::new(
+                "batch_entries must be divisible by chunk_entries",
+            ));
+        }
+
+        let chunks_per_batch = batch_entries / self.chunk_entries;
+        let expected_chunk_bytes = self.chunk_entries * PACKED_ENTRY_BYTES;
+        let mut batch = Vec::with_capacity(batch_entries * PACKED_ENTRY_BYTES);
+
+        for _ in 0..chunks_per_batch {
+            let Some(chunk) = self.next_chunk()? else {
+                return Ok(None);
+            };
+            if chunk.len() != expected_chunk_bytes {
+                return Err(PipelineError::new(format!(
+                    "packed chunk length {} does not match expected {}",
+                    chunk.len(),
+                    expected_chunk_bytes,
+                )));
+            }
+            batch.extend_from_slice(&chunk);
+        }
+
+        Ok(Some(batch))
+    }
+
     pub fn next_chunk(&self) -> Result<Option<Vec<u8>>, PipelineError> {
         self.take_error_if_any()?;
 
@@ -460,46 +491,32 @@ impl EncodedBatch {
     }
 }
 
-pub fn encode_packed_chunks(
+pub fn encode_packed_bytes(
     feature_set: &FeatureSet,
-    chunks: &[Vec<u8>],
+    packed_entries: &[u8],
     batch_size: usize,
     encode_threads: usize,
 ) -> Result<EncodedBatch, PipelineError> {
     if batch_size == 0 {
         return Err(PipelineError::new("batch_size must be greater than zero"));
     }
-
-    let mut total_entries = 0usize;
-    for chunk in chunks {
-        if chunk.len() % PACKED_ENTRY_BYTES != 0 {
-            return Err(PipelineError::new(
-                "packed chunk length must be a multiple of 32 bytes",
-            ));
-        }
-        total_entries += chunk.len() / PACKED_ENTRY_BYTES;
+    if packed_entries.len() % PACKED_ENTRY_BYTES != 0 {
+        return Err(PipelineError::new(
+            "packed entries length must be a multiple of 32 bytes",
+        ));
     }
-
+    let total_entries = packed_entries.len() / PACKED_ENTRY_BYTES;
     if total_entries != batch_size {
         return Err(PipelineError::new(format!(
-            "packed chunks contain {total_entries} entries but batch_size is {batch_size}",
+            "packed bytes contain {total_entries} entries but batch_size is {batch_size}",
         )));
-    }
-
-    let mut packed_entries = Vec::with_capacity(total_entries);
-    for chunk in chunks {
-        packed_entries.extend(chunk.chunks_exact(PACKED_ENTRY_BYTES).map(|packed| {
-            let mut fixed = [0u8; PACKED_ENTRY_BYTES];
-            fixed.copy_from_slice(packed);
-            fixed
-        }));
     }
 
     let max_active_features = feature_set.max_active_features();
     let threads = encode_threads.max(1);
     let encoded_rows = if threads == 1 {
         packed_entries
-            .iter()
+            .chunks_exact(PACKED_ENTRY_BYTES)
             .map(|packed| {
                 let entry = unpack_training_entry(packed)?;
                 let mut white = vec![-1; max_active_features];
@@ -520,7 +537,7 @@ pub fn encode_packed_chunks(
         });
         pool.install(|| {
             packed_entries
-                .par_iter()
+                .par_chunks_exact(PACKED_ENTRY_BYTES)
                 .map(|packed| {
                     let entry = unpack_training_entry(packed)?;
                     let mut white = vec![-1; max_active_features];

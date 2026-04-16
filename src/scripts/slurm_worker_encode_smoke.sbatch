@@ -44,16 +44,4 @@ done
 
 until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); assert ray.cluster_resources().get('CPU', 0) >= $EXPECTED_CPUS; ray.shutdown()" >/dev/null 2>&1; do sleep 2; done
 
-"$PY" -m src.distributed.smoke \
-  --ray-address "$ADDR" \
-  --feeder-count 10 \
-  --feeder-cpus 16 \
-  --loader-threads 16 \
-  --encode-threads 4 \
-  --batch-size 65536 \
-  --chunk-entries 8192 \
-  --bundle-chunks 8 \
-  --inflight-per-feeder 4 \
-  --target-batches 500 \
-  --max-seconds 300 \
-  "$@"
+"$PY" -m src.distributed.smoke --ray-address "$ADDR" "$@"
