@@ -11,7 +11,7 @@ from src.distributed.pipeline import RayBatchStream
 
 @dataclass(kw_only=True)
 class SmokeConfig(DistributedLoaderConfig):
-    target_batches: int = 200
+    target_batches: int = 2000
     max_seconds: float = 0.0
     pin_memory: bool = False
     report_interval_sec: float = 5.0

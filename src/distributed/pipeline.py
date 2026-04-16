@@ -25,7 +25,9 @@ class RayBatchStream:
         self.feature_set = cfg.feature_set.replace("^", "")
         self.chunks_per_batch = cfg.batch_size // cfg.chunk_entries
         self.total_threads = resolve_total_threads(cfg.loader_threads)
-        self.decode_threads = cfg.decode_threads if cfg.decode_threads > 0 else None
+        self.decode_threads = (
+            cfg.decode_threads if cfg.decode_threads > 0 else self.total_threads
+        )
         self.tensorizer = SparseBatchTensorizer(pin_memory=cfg.pin_memory)
         self.counters = RuntimeCounters()
 
@@ -37,13 +39,14 @@ class RayBatchStream:
         self.closed = False
 
         print(
-            "starting distributed loader: feeders={} batch_size={} chunk_entries={} chunks_per_batch={} bundle_chunks={} inflight_per_feeder={} encode_threads={}".format(
+            "starting distributed loader: feeders={} batch_size={} chunk_entries={} chunks_per_batch={} bundle_chunks={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
                 cfg.feeder_count,
                 cfg.batch_size,
                 cfg.chunk_entries,
                 self.chunks_per_batch,
                 cfg.bundle_chunks,
                 cfg.inflight_per_feeder,
+                self.decode_threads,
                 cfg.encode_threads,
             ),
             flush=True,

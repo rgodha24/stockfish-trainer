@@ -13,18 +13,18 @@ class DistributedLoaderConfig:
     feature_set: str = "Full_Threats+HalfKAv2_hm^"
     batch_size: int = 65536
     chunk_entries: int = 8192
-    feeder_count: int = 6
+    feeder_count: int = 10
     cyclic: bool = True
 
     loader_threads: int = 16
     decode_threads: int = -1
-    encode_threads: int = 1
+    encode_threads: int = 8
     shuffle_buffer_entries: int = 16384
 
     filtered: bool = True
     wld_filtered: bool = True
-    random_fen_skipping: int = 0
-    early_fen_skipping: int = -1
+    random_fen_skipping: int = 6
+    early_fen_skipping: int = 12
     simple_eval_skipping: int = -1
     param_index: int = 0
     pc_y1: float = 1.0
@@ -37,8 +37,8 @@ class DistributedLoaderConfig:
     log_to_driver: bool = True
     feeder_cpus: float = 16.0
 
-    bundle_chunks: int = 1
-    inflight_per_feeder: int = 1
+    bundle_chunks: int = 8
+    inflight_per_feeder: int = 4
     report_interval_sec: float = 5.0
     pin_memory: bool = True
 

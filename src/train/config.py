@@ -108,16 +108,20 @@ class SingleNodeTrainingConfig(BaseTrainingConfig):
 
 @dataclass(kw_only=True)
 class MultiNodeTrainingConfig(BaseTrainingConfig):
+    batch_size: int = 65536
     loader_threads: int = 16
+    encode_threads: int = 8
+    random_fen_skipping: int = 6
+    early_fen_skipping: int = 12
     ray_address: str | None = None
     ray_namespace: str = "stockfish-trainer"
     ray_log_to_driver: bool = True
 
-    feeder_count: int = 6
+    feeder_count: int = 10
     feeder_cpus: float = 16.0
     decode_threads: int = -1
-    bundle_chunks: int = 1
-    inflight_per_feeder: int = 1
+    bundle_chunks: int = 8
+    inflight_per_feeder: int = 4
     report_interval_sec: float = 30.0
 
     def __post_init__(self) -> None:

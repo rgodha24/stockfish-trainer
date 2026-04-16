@@ -3,7 +3,7 @@
 #SBATCH --nodes=1 --ntasks=1 --ntasks-per-node=1 --gpus-per-task=1 --cpus-per-task=8 --time=12:00:00
 #SBATCH --output=dist-train-%j.out
 #SBATCH hetjob
-#SBATCH --nodes=6 --ntasks=6 --ntasks-per-node=1 --cpus-per-task=16
+#SBATCH --nodes=10 --ntasks=10 --ntasks-per-node=1 --cpus-per-task=16
 
 set -euo pipefail
 [[ "$#" -lt 1 ]] && { echo "usage: sbatch $0 <dataset.binpack> ... [trainer args]"; exit 1; }
@@ -34,6 +34,6 @@ for NODE in "${WORKERS[@]}"; do
     "$RAY" "$ADDR" "$(ip4 "$NODE")" "$WORKER_CPUS" &
 done
 
-until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); assert ray.cluster_resources().get('CPU', 0) >= $EXPECTED_CPUS; ray.shutdown()"; do sleep 2; done
+until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); assert ray.cluster_resources().get('CPU', 0) >= $EXPECTED_CPUS; ray.shutdown()" >/dev/null 2>&1; do sleep 2; done
 
 "$PY" -m src.train.multinode --ray-address "$ADDR" "$@"
