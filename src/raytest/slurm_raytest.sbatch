@@ -36,15 +36,88 @@ resolve_ipv4() {
   return 1
 }
 
+is_port_free() {
+  local port="$1"
+  python - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("0.0.0.0", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
+pick_free_port() {
+  local preferred="$1"
+  local low="$2"
+  local high="$3"
+  python - "$preferred" "$low" "$high" <<'PY'
+import random
+import socket
+import sys
+
+preferred = int(sys.argv[1])
+low = int(sys.argv[2])
+high = int(sys.argv[3])
+
+
+def is_free(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("0.0.0.0", port))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+if is_free(preferred):
+    print(preferred)
+    raise SystemExit(0)
+
+for _ in range(256):
+    port = random.randint(low, high)
+    if is_free(port):
+        print(port)
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 if ! HEAD_IP=$(resolve_ipv4 "${HEAD_NODE}"); then
   echo "failed to resolve IPv4 address for head node ${HEAD_NODE}"
   exit 1
 fi
 
-RAY_PORT=${RAY_PORT:-6379}
-RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
+if [[ -n "${RAY_PORT:-}" ]]; then
+  if ! is_port_free "${RAY_PORT}"; then
+    echo "requested RAY_PORT=${RAY_PORT} is already in use on ${HEAD_NODE}"
+    exit 1
+  fi
+else
+  RAY_PORT=$(pick_free_port "$((20000 + (SLURM_JOB_ID % 20000)))" 20000 50000)
+fi
+
+if [[ -n "${RAY_DASHBOARD_PORT:-}" ]]; then
+  if ! is_port_free "${RAY_DASHBOARD_PORT}"; then
+    echo "requested RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT} is already in use on ${HEAD_NODE}"
+    exit 1
+  fi
+else
+  RAY_DASHBOARD_PORT=$(pick_free_port "$((50001 + (SLURM_JOB_ID % 10000)))" 50001 62000)
+fi
+
 RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
-RAY_START_TIMEOUT=${RAY_START_TIMEOUT:-90}
 
 FEEDER_COUNT=${FEEDER_COUNT:-2}
 FEEDER_CPUS=${FEEDER_CPUS:-16}
@@ -84,6 +157,8 @@ echo "head nodes: ${HEAD_NODES[*]}"
 echo "worker nodes: ${WORKER_NODES[*]}"
 echo "ray head node: ${HEAD_NODE}"
 echo "ray head ip: ${HEAD_IP}"
+echo "ray gcs port: ${RAY_PORT}"
+echo "ray dashboard port: ${RAY_DASHBOARD_PORT}"
 echo "ray address: ${RAY_ADDRESS}"
 echo "datasets: ${DATASETS[*]}"
 
@@ -92,6 +167,12 @@ uv run --no-sync ray start --head --node-ip-address="${HEAD_IP}" --port="${RAY_P
 HEAD_PID=$!
 
 sleep 4
+
+if ! kill -0 "${HEAD_PID}" >/dev/null 2>&1; then
+  echo "ray head failed to stay alive after startup"
+  wait "${HEAD_PID}" || true
+  exit 1
+fi
 
 for NODE in "${WORKER_NODES[@]}"; do
   if ! NODE_IP=$(resolve_ipv4 "${NODE}"); then

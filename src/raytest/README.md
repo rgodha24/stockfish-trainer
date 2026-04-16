@@ -56,6 +56,8 @@ The script starts Ray with `uv run ray ...` on all nodes and keeps all daemons a
 
 Note: the launcher resolves hostnames to IPv4 addresses and uses IPs for `--address` / `--node-ip-address` to avoid GCS hostname resolution issues.
 
+Note: by default, the launcher auto-picks free head ports to avoid collisions (`RAY_PORT` and `RAY_DASHBOARD_PORT`). You can still force fixed ports by exporting those env vars before `sbatch`.
+
 Tune via environment variables before `sbatch`:
 
 - `FEEDER_COUNT`
