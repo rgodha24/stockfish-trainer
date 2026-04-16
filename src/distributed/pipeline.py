@@ -5,9 +5,8 @@ from collections import deque
 from typing import Any
 
 import ray
-import rust
 
-from src.data import PACKED_ENTRY_BYTES, SparseBatchTensorizer, resolve_total_threads
+from src.data import SparseBatchTensorizer, resolve_total_threads
 from src.distributed.config import DistributedLoaderConfig
 from src.distributed.feeder import PackedFeeder
 from src.distributed.metrics import (
@@ -23,27 +22,26 @@ class RayBatchStream:
     def __init__(self, cfg: DistributedLoaderConfig):
         self.cfg = cfg
         self.feature_set = cfg.feature_set.replace("^", "")
-        self.chunks_per_batch = cfg.batch_size // cfg.chunk_entries
         self.total_threads = resolve_total_threads(cfg.loader_threads)
         self.decode_threads = (
-            cfg.decode_threads if cfg.decode_threads > 0 else self.total_threads
+            cfg.decode_threads if cfg.decode_threads > 0
+            else max(1, self.total_threads - cfg.encode_threads)
         )
         self.tensorizer = SparseBatchTensorizer(pin_memory=cfg.pin_memory)
         self.counters = RuntimeCounters()
 
         self.actors: list[Any] = []
         self.inflight: dict[Any, int] = {}
-        self.pending_chunks: deque[bytes] = deque()
+        self.pending_batches: deque[dict] = deque()
         self.start_time = 0.0
         self.next_report_time = 0.0
         self.closed = False
 
         print(
-            "starting distributed loader: feeders={} batch_size={} chunk_entries={} chunks_per_batch={} bundle_chunks={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
+            "starting distributed loader: feeders={} batch_size={} chunk_entries={} bundle_chunks={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
                 cfg.feeder_count,
                 cfg.batch_size,
                 cfg.chunk_entries,
-                self.chunks_per_batch,
                 cfg.bundle_chunks,
                 cfg.inflight_per_feeder,
                 self.decode_threads,
@@ -64,6 +62,8 @@ class RayBatchStream:
         for rank in range(cfg.feeder_count):
             actor = PackedFeeder.options(num_cpus=cfg.feeder_cpus).remote(
                 filenames=list(cfg.datasets),
+                feature_set=self.feature_set,
+                encode_threads=cfg.encode_threads,
                 total_threads=self.total_threads,
                 decode_threads=self.decode_threads,
                 chunk_entries=cfg.chunk_entries,
@@ -106,15 +106,17 @@ class RayBatchStream:
         feeder_idx = self.inflight.pop(ref)
 
         get_start = time.perf_counter()
-        chunks, entries, dropped = ray.get(ref)
+        encoded, entries, dropped = ray.get(ref)
         self.counters.get_sec += time.perf_counter() - get_start
         self.counters.dropped_partial_chunks += dropped
 
-        if chunks:
-            self.counters.received_chunks += len(chunks)
+        if encoded is not None:
+            self.counters.received_chunks += self.cfg.bundle_chunks
             self.counters.received_entries += entries
-            self.counters.received_bytes += entries * PACKED_ENTRY_BYTES
-            self.pending_chunks.extend(chunks)
+            self.counters.received_bytes += sum(
+                v.nbytes for v in encoded.values() if hasattr(v, "nbytes")
+            )
+            self.pending_batches.append(encoded)
 
             next_ref = self.actors[feeder_idx].next_bundle.remote(
                 self.cfg.bundle_chunks
@@ -122,31 +124,21 @@ class RayBatchStream:
             self.inflight[next_ref] = feeder_idx
 
     def __next__(self):
-        while len(self.pending_chunks) < self.chunks_per_batch:
+        while not self.pending_batches:
             if not self.inflight:
                 raise StopIteration
             self._wait_for_bundle()
 
-        chunk_group = [
-            self.pending_chunks.popleft() for _ in range(self.chunks_per_batch)
-        ]
-        encode_start = time.perf_counter()
-        batch = rust.encode_packed_chunks(
-            self.feature_set,
-            chunk_group,
-            self.cfg.batch_size,
-            self.cfg.encode_threads,
-        )
-        self.counters.encode_sec += time.perf_counter() - encode_start
+        batch = self.pending_batches.popleft()
         self.counters.encoded_batches += 1
-        self.counters.encoded_entries += self.cfg.batch_size
+        self.counters.encoded_entries += batch["size"]
         self._report_progress()
         return self.tensorizer.to_tuple(batch)
 
     def snapshot(self) -> dict[str, float | int]:
         return self.counters.snapshot(
             start_time=self.start_time,
-            pending_chunks=len(self.pending_chunks),
+            pending_chunks=len(self.pending_batches),
             inflight_calls=len(self.inflight),
         )
 
@@ -180,7 +172,7 @@ class RayBatchStream:
         finally:
             self.actors = []
             self.inflight.clear()
-            self.pending_chunks.clear()
+            self.pending_batches.clear()
             ray.shutdown()
 
     def __del__(self) -> None:

@@ -508,11 +508,15 @@ pub fn encode_packed_chunks(
             })
             .collect::<Vec<_>>()
     } else {
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .map_err(|error| PipelineError::new(format!("failed to build encode pool: {error}")))?;
-        thread_pool.install(|| {
+        static ENCODE_POOL: std::sync::OnceLock<rayon::ThreadPool> =
+            std::sync::OnceLock::new();
+        let pool = ENCODE_POOL.get_or_init(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("failed to build encode pool")
+        });
+        pool.install(|| {
             packed_entries
                 .par_iter()
                 .map(|packed| {

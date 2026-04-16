@@ -18,7 +18,7 @@ class DistributedLoaderConfig:
 
     loader_threads: int = 16
     decode_threads: int = -1
-    encode_threads: int = 8
+    encode_threads: int = 4
     shuffle_buffer_entries: int = 16384
 
     filtered: bool = True
@@ -47,18 +47,18 @@ class DistributedLoaderConfig:
             raise ValueError("Argument `datasets` is required.")
         if self.batch_size <= 0 or self.chunk_entries <= 0:
             raise ValueError("`batch_size` and `chunk_entries` must be positive.")
-        if self.batch_size % self.chunk_entries != 0:
-            raise ValueError("`batch_size` must be divisible by `chunk_entries`.")
         if self.feeder_count <= 0:
             raise ValueError("`feeder_count` must be positive.")
         if self.loader_threads == 0:
             raise ValueError("`loader_threads` must be positive or -1 for auto.")
         if self.decode_threads == 0:
             raise ValueError("`decode_threads` must be positive or -1 for auto.")
-        if self.encode_threads < 0:
-            raise ValueError("`encode_threads` must be non-negative.")
+        if self.encode_threads <= 0:
+            raise ValueError("`encode_threads` must be positive.")
         if self.bundle_chunks <= 0:
             raise ValueError("`bundle_chunks` must be positive.")
+        if self.bundle_chunks * self.chunk_entries != self.batch_size:
+            raise ValueError("`bundle_chunks * chunk_entries` must equal `batch_size`.")
         if self.inflight_per_feeder <= 0:
             raise ValueError("`inflight_per_feeder` must be positive.")
         if self.feeder_cpus <= 0:

@@ -51,7 +51,7 @@ def format_progress(snapshot: dict[str, float | int]) -> str:
     return (
         "elapsed={elapsed_sec:.1f}s batches={encoded_batches} entries={encoded_entries} "
         "batch/s={batch_per_sec:.2f} entry/s={entry_per_sec:.0f} recv_gib/s={recv_gib_per_sec:.2f} "
-        "wait={wait_pct:.1f}% encode={encode_pct:.1f}% pending_chunks={pending_chunks} inflight={inflight_calls}"
+        "wait={wait_pct:.1f}% encode={encode_pct:.1f}% pending_batches={pending_chunks} inflight={inflight_calls}"
     ).format(
         elapsed_sec=float(snapshot["elapsed_sec"]),
         encoded_batches=int(snapshot["encoded_batches"]),

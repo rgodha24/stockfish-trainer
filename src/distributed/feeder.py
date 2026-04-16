@@ -14,6 +14,8 @@ class PackedFeeder:
         self,
         *,
         filenames: list[str],
+        feature_set: str,
+        encode_threads: int,
         total_threads: int,
         decode_threads: int | None,
         chunk_entries: int,
@@ -24,6 +26,8 @@ class PackedFeeder:
         rank: int,
         world_size: int,
     ) -> None:
+        self.feature_set = feature_set
+        self.encode_threads = encode_threads
         self.chunk_entries = int(chunk_entries)
         self.expected_chunk_bytes = self.chunk_entries * PACKED_ENTRY_BYTES
         self.stream = rust.PackedEntryStream(
@@ -51,9 +55,9 @@ class PackedFeeder:
         self.returned_entries = 0
         self.dropped_partial_chunks = 0
 
-    def next_bundle(self, bundle_chunks: int) -> tuple[list[bytes], int, int]:
+    def next_bundle(self, bundle_chunks: int) -> tuple[dict | None, int, int]:
         if self.done:
-            return [], 0, 0
+            return None, 0, 0
 
         chunks: list[bytes] = []
         entries = 0
@@ -73,7 +77,16 @@ class PackedFeeder:
         self.returned_chunks += len(chunks)
         self.returned_entries += entries
         self.dropped_partial_chunks += dropped
-        return chunks, entries, dropped
+
+        if len(chunks) != bundle_chunks:
+            # partial end-of-stream bundle — drop it
+            return None, 0, dropped
+
+        batch_size = bundle_chunks * self.chunk_entries
+        encoded = rust.encode_packed_chunks(
+            self.feature_set, chunks, batch_size, self.encode_threads
+        )
+        return encoded, entries, dropped
 
     def stats(self) -> dict[str, Any]:
         return {
