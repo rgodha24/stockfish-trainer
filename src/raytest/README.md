@@ -58,6 +58,8 @@ Note: the launcher resolves hostnames to IPv4 addresses and uses IPs for `--addr
 
 Note: by default, the launcher auto-picks free head ports to avoid collisions (`RAY_PORT` and `RAY_DASHBOARD_PORT`). You can still force fixed ports by exporting those env vars before `sbatch`.
 
+Note: the launcher now executes Ray/Python from your project virtualenv directly (`$SLURM_SUBMIT_DIR/.venv/bin`) so worker processes use the same environment and avoid Ray runtime-env auto-venv issues.
+
 Tune via environment variables before `sbatch`:
 
 - `FEEDER_COUNT`

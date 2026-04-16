@@ -20,6 +20,18 @@ if [ "$#" -lt 1 ]; then
   exit 1
 fi
 
+PROJECT_ROOT=${SLURM_SUBMIT_DIR:-$PWD}
+cd "${PROJECT_ROOT}"
+
+VENV_BIN="${PROJECT_ROOT}/.venv/bin"
+RAY_BIN="${VENV_BIN}/ray"
+PY_BIN="${VENV_BIN}/python"
+
+if [[ ! -x "${RAY_BIN}" || ! -x "${PY_BIN}" ]]; then
+  echo "expected Ray and Python in ${VENV_BIN}; run 'uv sync' first"
+  exit 1
+fi
+
 DATASETS=("$@")
 readarray -t HEAD_NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST_HET_GROUP_0")
 readarray -t WORKER_NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST_HET_GROUP_1")
@@ -137,10 +149,10 @@ HEAD_PID=""
 WORKER_SRUN_PIDS=()
 
 cleanup() {
-  uv run --no-sync ray stop --force >/dev/null 2>&1 || true
+  "${RAY_BIN}" stop --force >/dev/null 2>&1 || true
   for NODE in "${WORKER_NODES[@]}"; do
     srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
-      bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true" || true
+      bash -lc '"'"${RAY_BIN}"'" stop --force >/dev/null 2>&1 || true' || true
   done
 
   if [[ -n "${HEAD_PID}" ]]; then
@@ -162,8 +174,8 @@ echo "ray dashboard port: ${RAY_DASHBOARD_PORT}"
 echo "ray address: ${RAY_ADDRESS}"
 echo "datasets: ${DATASETS[*]}"
 
-uv run --no-sync ray stop --force >/dev/null 2>&1 || true
-uv run --no-sync ray start --head --node-ip-address="${HEAD_IP}" --port="${RAY_PORT}" --dashboard-port="${RAY_DASHBOARD_PORT}" --num-cpus=0 --disable-usage-stats --block &
+"${RAY_BIN}" stop --force >/dev/null 2>&1 || true
+"${RAY_BIN}" start --head --node-ip-address="${HEAD_IP}" --port="${RAY_PORT}" --dashboard-port="${RAY_DASHBOARD_PORT}" --num-cpus=0 --disable-usage-stats --block &
 HEAD_PID=$!
 
 sleep 4
@@ -181,13 +193,13 @@ for NODE in "${WORKER_NODES[@]}"; do
   fi
   echo "starting worker ${NODE} (${NODE_IP})"
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
-    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; uv run --no-sync ray start --address=${RAY_ADDRESS} --node-ip-address=${NODE_IP} --num-cpus=16 --disable-usage-stats --block" &
+    bash -lc '"'"${RAY_BIN}"'" stop --force >/dev/null 2>&1 || true; "'"${RAY_BIN}"'" start --address='"${RAY_ADDRESS}"' --node-ip-address='"${NODE_IP}"' --num-cpus=16 --disable-usage-stats --block' &
   WORKER_SRUN_PIDS+=("$!")
 done
 
 READY=0
 for _ in $(seq 1 30); do
-  if uv run --no-sync python - <<PY
+  if "${PY_BIN}" - <<PY
 import ray
 
 ray.init(address="${RAY_ADDRESS}", log_to_driver=False)
@@ -204,13 +216,13 @@ done
 
 if [[ "${READY}" -ne 1 ]]; then
   echo "ray cluster did not become ready with enough worker CPU"
-  uv run --no-sync ray status --address "${RAY_ADDRESS}" || true
+  "${RAY_BIN}" status --address "${RAY_ADDRESS}" || true
   exit 1
 fi
 
-uv run --no-sync ray status --address "${RAY_ADDRESS}" || true
+"${RAY_BIN}" status --address "${RAY_ADDRESS}" || true
 
-uv run --no-sync python -m src.raytest.run \
+"${PY_BIN}" -m src.raytest.run \
   --ray-address "${RAY_ADDRESS}" \
   --feeder-count "${FEEDER_COUNT}" \
   --feeder-cpus "${FEEDER_CPUS}" \
