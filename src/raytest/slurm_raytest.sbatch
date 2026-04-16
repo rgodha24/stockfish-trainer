@@ -25,9 +25,26 @@ readarray -t HEAD_NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST_HET_GRO
 readarray -t WORKER_NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST_HET_GROUP_1")
 HEAD_NODE=${HEAD_NODES[0]}
 
+resolve_ipv4() {
+  local host="$1"
+  while read -r ip _; do
+    if [[ "${ip}" == *.* ]]; then
+      printf '%s\n' "${ip}"
+      return 0
+    fi
+  done < <(getent ahostsv4 "${host}" 2>/dev/null || true)
+  return 1
+}
+
+if ! HEAD_IP=$(resolve_ipv4 "${HEAD_NODE}"); then
+  echo "failed to resolve IPv4 address for head node ${HEAD_NODE}"
+  exit 1
+fi
+
 RAY_PORT=${RAY_PORT:-6379}
 RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
-RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
+RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
+RAY_START_TIMEOUT=${RAY_START_TIMEOUT:-90}
 
 FEEDER_COUNT=${FEEDER_COUNT:-2}
 FEEDER_CPUS=${FEEDER_CPUS:-16}
@@ -57,19 +74,27 @@ trap cleanup EXIT
 echo "head nodes: ${HEAD_NODES[*]}"
 echo "worker nodes: ${WORKER_NODES[*]}"
 echo "ray head node: ${HEAD_NODE}"
+echo "ray head ip: ${HEAD_IP}"
 echo "ray address: ${RAY_ADDRESS}"
 echo "datasets: ${DATASETS[*]}"
 
 srun --het-group=0 --nodes=1 --ntasks=1 --nodelist="${HEAD_NODE}" \
-  bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; uv run --no-sync ray start --head --node-ip-address=${HEAD_NODE} --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=0 --disable-usage-stats" &
+  bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; timeout ${RAY_START_TIMEOUT} uv run --no-sync ray start --head --node-ip-address=${HEAD_IP} --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=0 --disable-usage-stats" &
 
 sleep 4
 
 for NODE in "${WORKER_NODES[@]}"; do
+  if ! NODE_IP=$(resolve_ipv4 "${NODE}"); then
+    echo "failed to resolve IPv4 address for worker node ${NODE}"
+    exit 1
+  fi
+  echo "starting worker ${NODE} (${NODE_IP})"
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
-    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; uv run --no-sync ray start --address=${RAY_ADDRESS} --num-cpus=16 --disable-usage-stats" &
+    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; timeout ${RAY_START_TIMEOUT} uv run --no-sync ray start --address=${RAY_ADDRESS} --node-ip-address=${NODE_IP} --num-cpus=16 --disable-usage-stats" &
 done
 wait
+
+uv run --no-sync ray status --address "${RAY_ADDRESS}" || true
 
 uv run --no-sync python -m src.raytest.run \
   --ray-address "${RAY_ADDRESS}" \

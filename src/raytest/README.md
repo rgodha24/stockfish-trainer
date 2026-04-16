@@ -54,6 +54,8 @@ Default hetjob shape in the script:
 
 The script starts Ray with `uv run ray ...` on all nodes.
 
+Note: the launcher resolves hostnames to IPv4 addresses and uses IPs for `--address` / `--node-ip-address` to avoid GCS hostname resolution issues.
+
 Tune via environment variables before `sbatch`:
 
 - `FEEDER_COUNT`
