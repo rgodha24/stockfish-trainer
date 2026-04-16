@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=dist-train
-#SBATCH --nodes=1 --ntasks=1 --ntasks-per-node=1 --gpus-per-task=1 --cpus-per-task=8 --time=03:00:00
+#SBATCH --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:H100:1 --cpus-per-task=8 --time=03:00:00
 #SBATCH --output=dist-train-%j.out
 #SBATCH hetjob
 #SBATCH --nodes=10 --ntasks=10 --ntasks-per-node=1 --cpus-per-task=16
@@ -39,11 +39,20 @@ for NODE in "${WORKERS[@]}"; do
   [[ -z "$NODE_IP" ]] && NODE_IP=$(getent ahostsv4 "$NODE" | awk '/STREAM/{print $1; exit}')
   echo "worker $NODE: $NODE_IP"
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="$NODE" \
-    bash -lc '"$0" start --block --address="$1" --node-ip-address="$2" --num-cpus="$3" --disable-usage-stats || true' \
+    bash -lc 'RAY_raylet_start_wait_time_s=60 "$0" start --block --address="$1" --node-ip-address="$2" --num-cpus="$3" --disable-usage-stats' \
     "$RAY" "$ADDR" "$NODE_IP" "$WORKER_CPUS" &
 done
 
-until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); assert ray.cluster_resources().get('CPU', 0) >= $EXPECTED_CPUS; ray.shutdown()" >/dev/null 2>&1; do sleep 2; done
+# Fail fast if the cluster doesn't come up -- don't silently burn the wall clock.
+READY_DEADLINE=$(( SECONDS + 300 ))
+until "$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); assert ray.cluster_resources().get('CPU', 0) >= $EXPECTED_CPUS; ray.shutdown()" >/dev/null 2>&1; do
+  if (( SECONDS > READY_DEADLINE )); then
+    HAVE=$("$PY" -c "import ray; ray.init(address='$ADDR', log_to_driver=False); print(int(ray.cluster_resources().get('CPU', 0)))" 2>/dev/null || echo "?")
+    echo "Ray cluster never reached $EXPECTED_CPUS CPUs (only $HAVE joined); aborting." >&2
+    exit 1
+  fi
+  sleep 2
+done
 
 # threats.yaml step-1 hyperparameters
 "$PY" -m src.train.multinode \
