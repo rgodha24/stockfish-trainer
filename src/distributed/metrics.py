@@ -85,14 +85,16 @@ def format_feeder_stats(index: int, stats: dict[str, Any]) -> str:
     stream_stats = stats["stream"]
     return (
         "feeder={index} returned_batches={returned_batches} returned_entries={returned_entries} "
-        "decoded_entries={decoded_entries} skipped_entries={skipped_entries} "
-        "produced_chunks={produced_chunks} chunk_queue_len={chunk_queue_len}"
+        "decoded_entries={decoded_entries} encoded_entries={encoded_entries} skipped_entries={skipped_entries} "
+        "produced_batches={produced_batches} ready_queue_len={ready_queue_len} free_queue_len={free_queue_len}"
     ).format(
         index=index,
         returned_batches=int(stats["returned_batches"]),
         returned_entries=int(stats["returned_entries"]),
         decoded_entries=int(stream_stats["decoded_entries"]),
+        encoded_entries=int(stream_stats["encoded_entries"]),
         skipped_entries=int(stream_stats["skipped_entries"]),
-        produced_chunks=int(stream_stats["produced_chunks"]),
-        chunk_queue_len=int(stream_stats["chunk_queue_len"]),
+        produced_batches=int(stream_stats["produced_batches"]),
+        ready_queue_len=int(stream_stats["ready_queue_len"]),
+        free_queue_len=int(stream_stats["free_queue_len"]),
     )

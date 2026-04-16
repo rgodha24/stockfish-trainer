@@ -49,7 +49,6 @@ class BaseTrainingConfig:
     epoch_size: int = 100_000_000
     loader_threads: int = -1
     encode_threads: int = 0
-    chunk_entries: int = 8192
     shuffle_buffer_entries: int = 16384
     pin_memory: bool = True
 
@@ -68,10 +67,6 @@ class BaseTrainingConfig:
             raise ValueError(
                 "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."
             )
-        if self.chunk_entries <= 0:
-            raise ValueError("Argument `chunk_entries` must be positive.")
-        if self.batch_size % self.chunk_entries != 0:
-            raise ValueError("`batch_size` must be divisible by `chunk_entries`.")
         if self.encode_threads < 0:
             raise ValueError("`encode_threads` must be non-negative.")
         if self.shuffle_buffer_entries < 0:
@@ -95,15 +90,7 @@ class BaseTrainingConfig:
 
 @dataclass(kw_only=True)
 class SingleNodeTrainingConfig(BaseTrainingConfig):
-    data_loader_workers: int = 0
-    data_loader_queue_size: int = 16
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.data_loader_workers < 0:
-            raise ValueError("`data_loader_workers` must be non-negative.")
-        if self.data_loader_queue_size <= 0:
-            raise ValueError("`data_loader_queue_size` must be positive.")
+    pass
 
 
 @dataclass(kw_only=True)
@@ -143,7 +130,6 @@ class MultiNodeTrainingConfig(BaseTrainingConfig):
             datasets=self.datasets,
             feature_set=self.features,
             batch_size=self.batch_size,
-            chunk_entries=self.chunk_entries,
             feeder_count=self.feeder_count,
             cyclic=True,
             loader_threads=self.loader_threads,

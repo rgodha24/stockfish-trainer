@@ -16,21 +16,16 @@ def make_train_loader(args: SingleNodeTrainingConfig) -> DataLoader:
         cyclic=True,
         loader_threads=args.loader_threads,
         config=args.loader_skip_config(),
-        chunk_entries=args.chunk_entries,
         shuffle_buffer_entries=args.shuffle_buffer_entries,
+        pin_memory=args.pin_memory,
         encode_threads=args.encode_threads,
-    )
-    prefetch_factor = (
-        None if args.data_loader_workers == 0 else args.data_loader_queue_size
     )
     return DataLoader(
         stream,
         batch_size=None,
         batch_sampler=None,
-        num_workers=args.data_loader_workers,
-        pin_memory=args.pin_memory,
-        persistent_workers=args.data_loader_workers > 0,
-        prefetch_factor=prefetch_factor,
+        num_workers=0,
+        pin_memory=False,
     )
 
 

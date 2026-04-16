@@ -1,3 +1,3 @@
-from ._internal import PackedEntryStream
+from ._internal import BatchStream
 
-__all__ = ["PackedEntryStream"]
+__all__ = ["BatchStream"]

@@ -12,7 +12,6 @@ class DistributedLoaderConfig:
     datasets: Positional[tuple[str, ...]] = ()
     feature_set: str = "Full_Threats+HalfKAv2_hm^"
     batch_size: int = 65536
-    chunk_entries: int = 8192
     feeder_count: int = 10
     cyclic: bool = True
 
@@ -44,8 +43,8 @@ class DistributedLoaderConfig:
     def __post_init__(self) -> None:
         if not self.datasets:
             raise ValueError("Argument `datasets` is required.")
-        if self.batch_size <= 0 or self.chunk_entries <= 0:
-            raise ValueError("`batch_size` and `chunk_entries` must be positive.")
+        if self.batch_size <= 0:
+            raise ValueError("`batch_size` must be positive.")
         if self.feeder_count <= 0:
             raise ValueError("`feeder_count` must be positive.")
         if self.loader_threads == 0:

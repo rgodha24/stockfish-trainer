@@ -9,7 +9,7 @@ from src.data import DataloaderSkipConfig
 
 
 @ray.remote(max_restarts=0)
-class PackedFeeder:
+class BatchFeeder:
     def __init__(
         self,
         *,
@@ -19,7 +19,6 @@ class PackedFeeder:
         encode_threads: int,
         total_threads: int,
         decode_threads: int | None,
-        chunk_entries: int,
         shuffle_buffer_entries: int,
         seed: int | None,
         cyclic: bool,
@@ -27,14 +26,14 @@ class PackedFeeder:
         rank: int,
         world_size: int,
     ) -> None:
-        self.feature_set = feature_set
-        self.batch_size = int(batch_size)
-        self.encode_threads = encode_threads
-        self.stream = rust.PackedEntryStream(
+        self.stream = rust.BatchStream(
+            feature_set,
             list(filenames),
+            int(batch_size),
             total_threads=total_threads,
             decode_threads=decode_threads,
-            chunk_entries=int(chunk_entries),
+            encode_threads=encode_threads,
+            slab_count=None,
             shuffle_buffer_entries=shuffle_buffer_entries,
             seed=seed,
             cyclic=cyclic,
@@ -58,16 +57,15 @@ class PackedFeeder:
         if self.done:
             return None, 0
 
-        encoded = self.stream.next_encoded_batch(
-            self.batch_size, self.feature_set, self.encode_threads
-        )
+        encoded = self.stream.next_batch()
         if encoded is None:
             self.done = True
             return None, 0
 
+        entries = int(encoded["size"])
         self.returned_batches += 1
-        self.returned_entries += self.batch_size
-        return encoded, self.batch_size
+        self.returned_entries += entries
+        return encoded, entries
 
     def stats(self) -> dict[str, Any]:
         return {

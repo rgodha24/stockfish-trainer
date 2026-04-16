@@ -8,7 +8,7 @@ import ray
 
 from src.data import SparseBatchTensorizer, resolve_total_threads
 from src.distributed.config import DistributedLoaderConfig
-from src.distributed.feeder import PackedFeeder
+from src.distributed.feeder import BatchFeeder
 from src.distributed.metrics import (
     RuntimeCounters,
     format_breakdown,
@@ -24,7 +24,8 @@ class RayBatchStream:
         self.feature_set = cfg.feature_set.replace("^", "")
         self.total_threads = resolve_total_threads(cfg.loader_threads)
         self.decode_threads = (
-            cfg.decode_threads if cfg.decode_threads > 0
+            cfg.decode_threads
+            if cfg.decode_threads > 0
             else max(1, self.total_threads - cfg.encode_threads)
         )
         self.tensorizer = SparseBatchTensorizer(pin_memory=cfg.pin_memory)
@@ -38,10 +39,9 @@ class RayBatchStream:
         self.closed = False
 
         print(
-            "starting distributed loader: feeders={} batch_size={} chunk_entries={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
+            "starting distributed loader: feeders={} batch_size={} inflight_per_feeder={} decode_threads={} encode_threads={}".format(
                 cfg.feeder_count,
                 cfg.batch_size,
-                cfg.chunk_entries,
                 cfg.inflight_per_feeder,
                 self.decode_threads,
                 cfg.encode_threads,
@@ -59,14 +59,13 @@ class RayBatchStream:
 
         skip_cfg = cfg.skip_config()
         for rank in range(cfg.feeder_count):
-            actor = PackedFeeder.options(num_cpus=cfg.feeder_cpus).remote(
+            actor = BatchFeeder.options(num_cpus=cfg.feeder_cpus).remote(
                 filenames=list(cfg.datasets),
                 feature_set=self.feature_set,
                 batch_size=cfg.batch_size,
                 encode_threads=cfg.encode_threads,
                 total_threads=self.total_threads,
                 decode_threads=self.decode_threads,
-                chunk_entries=cfg.chunk_entries,
                 shuffle_buffer_entries=cfg.shuffle_buffer_entries,
                 seed=None if cfg.seed is None else cfg.seed + rank,
                 cyclic=cfg.cyclic,

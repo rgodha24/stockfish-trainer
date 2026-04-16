@@ -6,9 +6,6 @@ import torch
 import rust
 
 
-PACKED_ENTRY_BYTES = 32
-
-
 @dataclass
 class DataloaderSkipConfig:
     filtered: bool = True
@@ -38,44 +35,6 @@ def resolve_total_threads(loader_threads: int) -> int:
     except (AttributeError, OSError):
         cpu_count = os.cpu_count() or 8
     return max(1, cpu_count - 1)
-
-
-def default_thread_split(
-    total_threads: int,
-    config: DataloaderSkipConfig,
-) -> tuple[int, int]:
-    skip_heavy = (
-        config.filtered
-        or config.wld_filtered
-        or config.random_fen_skipping > 0
-        or config.early_fen_skipping >= 0
-        or config.simple_eval_skipping > 0
-    )
-    if total_threads <= 1:
-        return 1, 1
-
-    if skip_heavy:
-        decode_threads = max(1, (total_threads * 3) // 4)
-        encode_threads = max(1, total_threads - decode_threads)
-        return decode_threads, encode_threads
-
-    decode_threads = max(1, min(8, total_threads // 4))
-    encode_threads = max(1, total_threads - decode_threads)
-    return decode_threads, encode_threads
-
-
-def resolve_thread_split(
-    total_threads: int,
-    config: DataloaderSkipConfig,
-    encode_threads: int,
-) -> tuple[int, int]:
-    decode_threads, default_encode_threads = default_thread_split(total_threads, config)
-    if encode_threads > 0:
-        chosen_encode_threads = max(1, encode_threads)
-        decode_threads = max(1, total_threads - chosen_encode_threads)
-    else:
-        chosen_encode_threads = default_encode_threads
-    return decode_threads, chosen_encode_threads
 
 
 class SparseBatchTensorizer:
@@ -134,94 +93,109 @@ class SparseBatchTensorizer:
         )
 
 
-class PackedChunkDataset(torch.utils.data.IterableDataset):
-    def __init__(
-        self,
-        filenames: list[str],
-        chunk_entries: int,
-        shuffle_buffer_entries: int,
-        cyclic: bool,
-        total_threads: int,
-        decode_threads: int,
-        config: DataloaderSkipConfig,
-        rank: int | None = None,
-        world_size: int | None = None,
-    ):
-        super().__init__()
-        self.filenames = list(filenames)
-        self.chunk_entries = int(chunk_entries)
-        self.shuffle_buffer_entries = int(shuffle_buffer_entries)
-        self.cyclic = bool(cyclic)
-        self.total_threads = int(total_threads)
-        self.decode_threads = int(decode_threads)
-        self.config = config
-        self.rank, self.world_size = _infer_world(rank, world_size)
-
-    def make_stream(self):
-        return rust.PackedEntryStream(
-            list(self.filenames),
-            total_threads=self.total_threads,
-            decode_threads=self.decode_threads,
-            chunk_entries=self.chunk_entries,
-            shuffle_buffer_entries=self.shuffle_buffer_entries,
-            seed=None,
-            cyclic=self.cyclic,
-            filtered=self.config.filtered,
-            random_fen_skipping=int(self.config.random_fen_skipping),
-            wld_filtered=self.config.wld_filtered,
-            early_fen_skipping=int(self.config.early_fen_skipping),
-            simple_eval_skipping=int(self.config.simple_eval_skipping or 0),
-            param_index=int(self.config.param_index),
-            pc_y1=float(self.config.pc_y1),
-            pc_y2=float(self.config.pc_y2),
-            pc_y3=float(self.config.pc_y3),
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-    def __iter__(self):
-        stream = self.make_stream()
-        try:
-            while True:
-                chunk = stream.next_chunk()
-                if chunk is None:
-                    break
-                yield chunk
-        finally:
-            stream.close()
-
-
-class EncodedBatchDataset(torch.utils.data.IterableDataset):
+class RustSparseBatchProvider:
     def __init__(
         self,
         feature_set: str,
-        chunk_dataset: PackedChunkDataset,
+        filenames: list[str],
         batch_size: int,
-        encode_threads: int,
+        cyclic: bool,
+        total_threads: int,
+        decode_threads: int | None,
+        encode_threads: int | None,
+        shuffle_buffer_entries: int,
+        config: DataloaderSkipConfig,
+        pin_memory: bool,
+        rank: int,
+        world_size: int,
     ):
-        super().__init__()
-        self.feature_set = feature_set.replace("^", "")
-        self.chunk_dataset = chunk_dataset
-        self.batch_size = int(batch_size)
-        self.encode_threads = int(encode_threads)
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        if self.encode_threads <= 0:
-            raise ValueError("encode_threads must be positive")
-        self.tensorizer = SparseBatchTensorizer()
+        self._stream = rust.BatchStream(
+            feature_set.replace("^", ""),
+            list(filenames),
+            batch_size,
+            total_threads=total_threads,
+            decode_threads=decode_threads,
+            encode_threads=encode_threads,
+            slab_count=None,
+            shuffle_buffer_entries=shuffle_buffer_entries,
+            seed=None,
+            cyclic=cyclic,
+            filtered=config.filtered,
+            random_fen_skipping=int(config.random_fen_skipping),
+            wld_filtered=config.wld_filtered,
+            early_fen_skipping=int(config.early_fen_skipping),
+            simple_eval_skipping=int(config.simple_eval_skipping or 0),
+            param_index=int(config.param_index),
+            pc_y1=float(config.pc_y1),
+            pc_y2=float(config.pc_y2),
+            pc_y3=float(config.pc_y3),
+            rank=rank,
+            world_size=world_size,
+        )
+        self._tensorizer = SparseBatchTensorizer(pin_memory=pin_memory)
 
     def __iter__(self):
-        stream = self.chunk_dataset.make_stream()
-        try:
-            while True:
-                batch = stream.next_encoded_batch(
-                    self.batch_size, self.feature_set, self.encode_threads
-                )
-                if batch is None:
-                    return
-                yield self.tensorizer.to_tuple(batch)
-        finally:
-            stream.close()
+        return self
+
+    def __next__(self):
+        batch = self._stream.next_batch()
+        if batch is None:
+            raise StopIteration
+        return self._tensorizer.to_tuple(batch)
+
+    def __del__(self):
+        if hasattr(self, "_stream"):
+            self._stream.close()
+
+
+class SparseBatchDataset(torch.utils.data.IterableDataset):
+    def __init__(
+        self,
+        feature_set: str,
+        filenames: list[str],
+        batch_size: int,
+        cyclic: bool = True,
+        loader_threads: int = -1,
+        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        shuffle_buffer_entries: int = 16384,
+        pin_memory: bool = False,
+        rank: int | None = None,
+        world_size: int | None = None,
+        encode_threads: int = 0,
+    ):
+        super().__init__()
+        self.feature_set = feature_set
+        self.filenames = filenames
+        self.batch_size = int(batch_size)
+        self.cyclic = cyclic
+        self.total_threads = resolve_total_threads(loader_threads)
+        self.shuffle_buffer_entries = int(shuffle_buffer_entries)
+        self.config = config
+        self.pin_memory = pin_memory
+        self.rank, self.world_size = _infer_world(rank, world_size)
+
+        if encode_threads > 0:
+            self.encode_threads = max(1, int(encode_threads))
+            self.decode_threads = max(1, self.total_threads - self.encode_threads)
+        else:
+            self.encode_threads = None
+            self.decode_threads = None
+
+    def __iter__(self):
+        return RustSparseBatchProvider(
+            self.feature_set,
+            self.filenames,
+            self.batch_size,
+            cyclic=self.cyclic,
+            total_threads=self.total_threads,
+            decode_threads=self.decode_threads,
+            encode_threads=self.encode_threads,
+            shuffle_buffer_entries=self.shuffle_buffer_entries,
+            config=self.config,
+            pin_memory=self.pin_memory,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
 
 
 def make_sparse_batch_dataset(
@@ -231,31 +205,22 @@ def make_sparse_batch_dataset(
     cyclic: bool = True,
     loader_threads: int = -1,
     config: DataloaderSkipConfig = DataloaderSkipConfig(),
-    chunk_entries: int = 8192,
     shuffle_buffer_entries: int = 16384,
+    pin_memory: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
     encode_threads: int = 0,
-) -> EncodedBatchDataset:
-    total_threads = resolve_total_threads(loader_threads)
-    decode_threads, chosen_encode_threads = resolve_thread_split(
-        total_threads, config, encode_threads
-    )
-
-    chunk_dataset = PackedChunkDataset(
+) -> SparseBatchDataset:
+    return SparseBatchDataset(
+        feature_set=feature_set,
         filenames=filenames,
-        chunk_entries=chunk_entries,
-        shuffle_buffer_entries=shuffle_buffer_entries,
+        batch_size=batch_size,
         cyclic=cyclic,
-        total_threads=total_threads,
-        decode_threads=decode_threads,
+        loader_threads=loader_threads,
         config=config,
+        shuffle_buffer_entries=shuffle_buffer_entries,
+        pin_memory=pin_memory,
         rank=rank,
         world_size=world_size,
-    )
-    return EncodedBatchDataset(
-        feature_set=feature_set,
-        chunk_dataset=chunk_dataset,
-        batch_size=batch_size,
-        encode_threads=chosen_encode_threads,
+        encode_threads=encode_threads,
     )

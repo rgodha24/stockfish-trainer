@@ -221,7 +221,6 @@ def build_loader_metrics(
     received_bytes = _loader_metric_delta(start, end, "received_bytes")
     wait_sec = _loader_metric_delta(start, end, "wait_sec")
     get_sec = _loader_metric_delta(start, end, "get_sec")
-    encode_sec = _loader_metric_delta(start, end, "encode_sec")
 
     if encoded_entries is not None:
         metrics["loader/encoded_positions_per_sec"] = encoded_entries / max(
@@ -239,11 +238,9 @@ def build_loader_metrics(
         metrics["loader/wait_fraction"] = wait_sec / max(elapsed, 1e-9)
     if get_sec is not None:
         metrics["loader/get_fraction"] = get_sec / max(elapsed, 1e-9)
-    if encode_sec is not None:
-        metrics["loader/encode_fraction"] = encode_sec / max(elapsed, 1e-9)
 
     if end is not None:
-        for key in ("pending_chunks", "inflight_calls", "encoded_batches"):
+        for key in ("pending_batches", "inflight_calls", "encoded_batches"):
             if key in end:
                 metrics[f"loader/{key}"] = end[key]
     return metrics
@@ -368,15 +365,13 @@ def run_training(
             if loader_end is not None:
                 encoded_pos_per_sec = metrics.get("loader/encoded_positions_per_sec")
                 wait_fraction = metrics.get("loader/wait_fraction")
-                encode_fraction = metrics.get("loader/encode_fraction")
                 print(
-                    "loader encoded_pos/s={} wait={:.1f}% encode={:.1f}% pending_chunks={} inflight={}".format(
+                    "loader encoded_pos/s={} wait={:.1f}% pending_batches={} inflight={}".format(
                         f"{encoded_pos_per_sec:.0f}"
                         if encoded_pos_per_sec is not None
                         else "n/a",
                         float(wait_fraction or 0.0) * 100.0,
-                        float(encode_fraction or 0.0) * 100.0,
-                        int(loader_end.get("pending_chunks", 0)),
+                        int(loader_end.get("pending_batches", 0)),
                         int(loader_end.get("inflight_calls", 0)),
                     ),
                     flush=True,

@@ -6,32 +6,35 @@ use numpy::ndarray::{ArrayView1, ArrayView2};
 use numpy::{PyArray1, PyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyDict;
 
 use crate::feature_extraction::FeatureSet;
 use crate::pipeline::{
-    encode_packed_bytes, EncodedBatch, PackedEntryStream, PackedStreamConfig, PipelineError,
-    SkipConfig,
+    default_batch_slab_count, BatchPipeline, PipelineConfig, PipelineError, PooledBatch,
+    SkipConfig, ThreadOverride,
 };
 
-#[pyclass(name = "PackedEntryStream")]
-pub struct PyPackedEntryStream {
-    stream: Mutex<Option<PackedEntryStream>>,
+#[pyclass(name = "BatchStream")]
+pub struct PyBatchStream {
+    pipeline: Mutex<Option<BatchPipeline>>,
 }
 
 #[pyclass]
-struct PyEncodedBatchOwner {
-    batch: EncodedBatch,
+struct PyBatchOwner {
+    batch: PooledBatch,
 }
 
 #[pymethods]
-impl PyPackedEntryStream {
+impl PyBatchStream {
     #[new]
     #[pyo3(signature = (
+        feature_set,
         filenames,
+        batch_size,
         total_threads=None,
         decode_threads=None,
-        chunk_entries=8192,
+        encode_threads=None,
+        slab_count=None,
         shuffle_buffer_entries=16384,
         seed=None,
         cyclic=false,
@@ -49,10 +52,13 @@ impl PyPackedEntryStream {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        feature_set: &str,
         filenames: Vec<String>,
+        batch_size: usize,
         total_threads: Option<usize>,
         decode_threads: Option<usize>,
-        chunk_entries: usize,
+        encode_threads: Option<usize>,
+        slab_count: Option<usize>,
         shuffle_buffer_entries: usize,
         seed: Option<u64>,
         cyclic: bool,
@@ -68,13 +74,24 @@ impl PyPackedEntryStream {
         rank: usize,
         world_size: usize,
     ) -> PyResult<Self> {
-        let mut config =
-            PackedStreamConfig::new(filenames.into_iter().map(PathBuf::from).collect());
+        let feature_set = FeatureSet::from_str(feature_set)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let mut config = PipelineConfig::new(
+            filenames.into_iter().map(PathBuf::from).collect(),
+            feature_set,
+            batch_size,
+        );
         if let Some(total_threads) = total_threads {
             config.total_threads = total_threads;
         }
-        config.decode_threads = decode_threads;
-        config.chunk_entries = chunk_entries;
+        if decode_threads.is_some() || encode_threads.is_some() {
+            config.thread_override = Some(ThreadOverride {
+                decode: decode_threads,
+                encode: encode_threads,
+            });
+        }
+        config.slab_count =
+            slab_count.unwrap_or_else(|| default_batch_slab_count(config.total_threads));
         config.shuffle_buffer_entries = shuffle_buffer_entries;
         config.seed = seed;
         config.cyclic = cyclic;
@@ -92,23 +109,23 @@ impl PyPackedEntryStream {
             pc_y3,
         };
 
-        let stream = PackedEntryStream::new(config).map_err(to_py_runtime_error)?;
+        let pipeline = BatchPipeline::new(config).map_err(to_py_runtime_error)?;
         Ok(Self {
-            stream: Mutex::new(Some(stream)),
+            pipeline: Mutex::new(Some(pipeline)),
         })
     }
 
-    fn next_chunk<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        let maybe_chunk = py.allow_threads(|| {
-            let guard = self.stream.lock().unwrap();
+    fn next_batch<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let maybe_batch = py.allow_threads(|| {
+            let guard = self.pipeline.lock().unwrap();
             match guard.as_ref() {
-                Some(stream) => stream.next_chunk(),
+                Some(pipeline) => pipeline.next_batch(),
                 None => Ok(None),
             }
         });
 
-        match maybe_chunk {
-            Ok(Some(chunk)) => Ok(Some(PyBytes::new(py, &chunk))),
+        match maybe_batch {
+            Ok(Some(batch)) => Ok(Some(batch_to_pydict(py, batch)?)),
             Ok(None) => Ok(None),
             Err(error) => Err(to_py_runtime_error(error)),
         }
@@ -116,12 +133,12 @@ impl PyPackedEntryStream {
 
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let stats = {
-            let guard = self.stream.lock().unwrap();
+            let guard = self.pipeline.lock().unwrap();
             match guard.as_ref() {
-                Some(stream) => stream.stats(),
+                Some(pipeline) => pipeline.stats(),
                 None => {
                     return Err(PyRuntimeError::new_err(
-                        "packed entry stream already closed",
+                        "batch stream has already been closed",
                     ))
                 }
             }
@@ -129,45 +146,18 @@ impl PyPackedEntryStream {
 
         let dict = PyDict::new(py);
         dict.set_item("decoded_entries", stats.decoded_entries)?;
+        dict.set_item("encoded_entries", stats.encoded_entries)?;
         dict.set_item("skipped_entries", stats.skipped_entries)?;
-        dict.set_item("produced_chunks", stats.produced_chunks)?;
+        dict.set_item("produced_batches", stats.produced_batches)?;
         dict.set_item("scanned_chunks", stats.scanned_chunks)?;
-        dict.set_item("chunk_queue_len", stats.chunk_queue_len)?;
+        dict.set_item("decoded_queue_len", stats.decoded_queue_len)?;
+        dict.set_item("ready_queue_len", stats.ready_queue_len)?;
+        dict.set_item("free_queue_len", stats.free_queue_len)?;
         Ok(dict)
     }
 
-    fn next_encoded_batch<'py>(
-        &self,
-        py: Python<'py>,
-        batch_size: usize,
-        feature_set: &str,
-        encode_threads: usize,
-    ) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let feature_set = FeatureSet::from_str(feature_set)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-        let result: Result<Option<EncodedBatch>, PipelineError> =
-            py.allow_threads(|| {
-                let guard = self.stream.lock().unwrap();
-                let stream = match guard.as_ref() {
-                    Some(s) => s,
-                    None => return Ok(None),
-                };
-
-                let Some(packed) = stream.next_batch(batch_size)? else {
-                    return Ok(None);
-                };
-                encode_packed_bytes(&feature_set, &packed, batch_size, encode_threads).map(Some)
-            });
-
-        match result.map_err(to_py_runtime_error)? {
-            None => Ok(None),
-            Some(batch) => Ok(Some(batch_to_pydict(py, batch)?)),
-        }
-    }
-
     fn close(&self) {
-        let mut guard = self.stream.lock().unwrap();
+        let mut guard = self.pipeline.lock().unwrap();
         let _ = guard.take();
     }
 
@@ -175,24 +165,24 @@ impl PyPackedEntryStream {
         slf
     }
 
-    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        match self.next_chunk(py)? {
-            Some(chunk) => Ok(chunk),
-            None => Err(PyStopIteration::new_err("packed entry stream exhausted")),
+    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        match self.next_batch(py)? {
+            Some(batch) => Ok(batch),
+            None => Err(PyStopIteration::new_err("batch stream is exhausted")),
         }
     }
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyPackedEntryStream>()?;
+    m.add_class::<PyBatchStream>()?;
     Ok(())
 }
 
-fn batch_to_pydict<'py>(py: Python<'py>, batch: EncodedBatch) -> PyResult<Bound<'py, PyDict>> {
-    let owner = Py::new(py, PyEncodedBatchOwner { batch })?;
+fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'py, PyDict>> {
+    let owner = Py::new(py, PyBatchOwner { batch })?;
     let owner_bound = owner.bind(py);
     let owner_ref = owner_bound.borrow();
-    let batch = &owner_ref.batch;
+    let batch = owner_ref.batch.slab();
     let rows = batch.len();
     let cols = batch.max_active_features();
 
