@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=raytest
-#SBATCH --account=coc
-#SBATCH --partition=ice-cpu
-#SBATCH --qos=coc-ice
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -11,9 +8,6 @@
 #SBATCH --output=raytest-%j.out
 
 #SBATCH hetjob
-#SBATCH --account=coc
-#SBATCH --partition=ice-cpu
-#SBATCH --qos=coc-ice
 #SBATCH --nodes=2
 #SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
