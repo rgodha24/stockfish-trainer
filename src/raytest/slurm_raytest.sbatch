@@ -51,10 +51,10 @@ SHUFFLE_BUFFER_ENTRIES=${SHUFFLE_BUFFER_ENTRIES:-16384}
 
 cleanup() {
   srun --het-group=0 --nodes=1 --ntasks=1 --nodelist="${HEAD_NODE}" \
-    bash -lc "uv run ray stop --force >/dev/null 2>&1 || true" || true
+    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true" || true
   for NODE in "${WORKER_NODES[@]}"; do
     srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
-      bash -lc "uv run ray stop --force >/dev/null 2>&1 || true" || true
+      bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true" || true
   done
 }
 
@@ -67,17 +67,17 @@ echo "ray address: ${RAY_ADDRESS}"
 echo "datasets: ${DATASETS[*]}"
 
 srun --het-group=0 --nodes=1 --ntasks=1 --nodelist="${HEAD_NODE}" \
-  bash -lc "uv run ray stop --force >/dev/null 2>&1 || true; uv run ray start --head --node-ip-address=${HEAD_NODE} --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=0 --disable-usage-stats" &
+  bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; uv run --no-sync ray start --head --node-ip-address=${HEAD_NODE} --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=0 --disable-usage-stats" &
 
 sleep 4
 
 for NODE in "${WORKER_NODES[@]}"; do
   srun --het-group=1 --nodes=1 --ntasks=1 --nodelist="${NODE}" \
-    bash -lc "uv run ray stop --force >/dev/null 2>&1 || true; uv run ray start --address=${RAY_ADDRESS} --num-cpus=16 --disable-usage-stats" &
+    bash -lc "uv run --no-sync ray stop --force >/dev/null 2>&1 || true; uv run --no-sync ray start --address=${RAY_ADDRESS} --num-cpus=16 --disable-usage-stats" &
 done
 wait
 
-uv run python -m src.raytest.run \
+uv run --no-sync python -m src.raytest.run \
   --ray-address "${RAY_ADDRESS}" \
   --feeder-count "${FEEDER_COUNT}" \
   --feeder-cpus "${FEEDER_CPUS}" \
