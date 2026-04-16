@@ -11,7 +11,7 @@ use pyo3::types::{PyBytes, PyDict};
 use crate::feature_extraction::FeatureSet;
 use crate::pipeline::{
     encode_packed_chunks, EncodedBatch, PackedEntryStream, PackedStreamConfig, PipelineError,
-    SkipConfig,
+    SkipConfig, PACKED_ENTRY_BYTES,
 };
 
 #[pyclass(name = "PackedEntryStream")]
@@ -134,6 +134,48 @@ impl PyPackedEntryStream {
         dict.set_item("scanned_chunks", stats.scanned_chunks)?;
         dict.set_item("chunk_queue_len", stats.chunk_queue_len)?;
         Ok(dict)
+    }
+
+    fn next_encoded_batch<'py>(
+        &self,
+        py: Python<'py>,
+        bundle_chunks: usize,
+        feature_set: &str,
+        encode_threads: usize,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let feature_set = FeatureSet::from_str(feature_set)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let result: Result<Option<EncodedBatch>, PipelineError> =
+            py.allow_threads(|| {
+                let guard = self.stream.lock().unwrap();
+                let stream = match guard.as_ref() {
+                    Some(s) => s,
+                    None => return Ok(None),
+                };
+
+                let expected_bytes = stream.chunk_entries * PACKED_ENTRY_BYTES;
+                let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(bundle_chunks);
+
+                while chunks.len() < bundle_chunks {
+                    match stream.next_chunk()? {
+                        None => return Ok(None),
+                        Some(chunk) => {
+                            if chunk.len() == expected_bytes {
+                                chunks.push(chunk);
+                            }
+                        }
+                    }
+                }
+
+                let batch_size = bundle_chunks * stream.chunk_entries;
+                encode_packed_chunks(&feature_set, &chunks, batch_size, encode_threads).map(Some)
+            });
+
+        match result.map_err(to_py_runtime_error)? {
+            None => Ok(None),
+            Some(batch) => Ok(Some(batch_to_pydict(py, batch)?)),
+        }
     }
 
     fn close(&self) {

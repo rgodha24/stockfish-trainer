@@ -86,6 +86,7 @@ pub struct PackedEntryStream {
     stats: Arc<PipelineCounters>,
     workers: Vec<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    pub chunk_entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +284,7 @@ impl PackedEntryStream {
             stats,
             workers,
             shutdown,
+            chunk_entries: config.chunk_entries,
         })
     }
 

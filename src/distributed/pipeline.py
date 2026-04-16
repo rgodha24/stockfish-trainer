@@ -106,12 +106,11 @@ class RayBatchStream:
         feeder_idx = self.inflight.pop(ref)
 
         get_start = time.perf_counter()
-        encoded, entries, dropped = ray.get(ref)
+        encoded, entries = ray.get(ref)
         self.counters.get_sec += time.perf_counter() - get_start
-        self.counters.dropped_partial_chunks += dropped
 
         if encoded is not None:
-            self.counters.received_chunks += self.cfg.bundle_chunks
+            self.counters.received_batches += 1
             self.counters.received_entries += entries
             self.counters.received_bytes += sum(
                 v.nbytes for v in encoded.values() if hasattr(v, "nbytes")
@@ -138,7 +137,7 @@ class RayBatchStream:
     def snapshot(self) -> dict[str, float | int]:
         return self.counters.snapshot(
             start_time=self.start_time,
-            pending_chunks=len(self.pending_batches),
+            pending_batches=len(self.pending_batches),
             inflight_calls=len(self.inflight),
         )
 
