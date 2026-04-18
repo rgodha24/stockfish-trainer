@@ -41,16 +41,12 @@ class MoELayerStacks(nn.Module):
     def _factorized_stacked_forward_all(
         self, layer: FactorizedStackedLinear, x: torch.Tensor
     ) -> torch.Tensor:
-        merged_weight = layer.linear.weight + layer.factorized_linear.weight.repeat(
-            self.num_experts, 1
-        )
-        merged_bias = layer.linear.bias + layer.factorized_linear.bias.repeat(
-            self.num_experts
-        )
-        expert_weight = merged_weight.reshape(
+        stacked_w = layer.linear.weight.reshape(
             self.num_experts, layer.out_features, layer.in_features
         )
-        expert_bias = merged_bias.reshape(self.num_experts, layer.out_features)
+        stacked_b = layer.linear.bias.reshape(self.num_experts, layer.out_features)
+        expert_weight = stacked_w + layer.factorized_linear.weight.unsqueeze(0)
+        expert_bias = stacked_b + layer.factorized_linear.bias.unsqueeze(0)
         return torch.einsum("bi,eoi->beo", x, expert_weight) + expert_bias.unsqueeze(0)
 
     def _stacked_forward_all(
@@ -100,7 +96,7 @@ class MoELayerStacks(nn.Module):
             l1c_all = self._factorized_stacked_forward_all(self.l1, expert_input)
             l1x_all, l1x_out_all = torch.split(l1c_all, [self.L2, 1], dim=2)
             l1x_all = torch.clamp(
-                torch.cat([torch.pow(l1x_all, 2.0) * (255 / 256), l1x_all], dim=2),
+                torch.cat([l1x_all.square() * (255 / 256), l1x_all], dim=2),
                 0.0,
                 1.0,
             )
@@ -113,7 +109,7 @@ class MoELayerStacks(nn.Module):
             l1c_ = self.l1(expert_input, expert_indices)
             l1x_, l1x_out = l1c_.split(self.L2, dim=1)
             l1x_ = torch.clamp(
-                torch.cat([torch.pow(l1x_, 2.0) * (255 / 256), l1x_], dim=1),
+                torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
                 0.0,
                 1.0,
             )

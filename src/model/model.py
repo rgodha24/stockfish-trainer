@@ -102,28 +102,18 @@ class NNUEModel(nn.Module):
         b, bpsqt = torch.split(bp, self.L1, dim=1)
 
         if self.stacks == "moe":
-            w_eval, w_route = torch.split(
-                w,
-                [
-                    self.eval_features_per_perspective,
-                    self.router_features_per_perspective,
-                ],
+            combined = us * torch.cat([w, b], dim=1) + them * torch.cat([b, w], dim=1)
+            w_half, b_half = combined.split(self.L1, dim=1)
+            w_e, w_r = w_half.split(
+                [self.eval_features_per_perspective, self.router_features_per_perspective],
                 dim=1,
             )
-            b_eval, b_route = torch.split(
-                b,
-                [
-                    self.eval_features_per_perspective,
-                    self.router_features_per_perspective,
-                ],
+            b_e, b_r = b_half.split(
+                [self.eval_features_per_perspective, self.router_features_per_perspective],
                 dim=1,
             )
-            router_input = (us * torch.cat([w_route, b_route], dim=1)) + (
-                them * torch.cat([b_route, w_route], dim=1)
-            )
-            l0_ = (us * torch.cat([w_eval, b_eval], dim=1)) + (
-                them * torch.cat([b_eval, w_eval], dim=1)
-            )
+            l0_ = torch.cat([w_e, b_e], dim=1)
+            router_input = torch.cat([w_r, b_r], dim=1)
             pairwise_chunk_size = self.eval_features_per_perspective // 2
         else:
             router_input = None
