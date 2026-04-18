@@ -651,14 +651,14 @@ impl SkipDecider {
         if self.config.random_fen_skipping > 0 && rng.gen_bool(self.random_skip_probability) {
             return true;
         }
-        if self.config.filtered && (is_capturing_move(entry) || is_in_check(entry)) {
-            return true;
-        }
         if self.config.wld_filtered {
             let keep_prob = score_result_prob(entry);
             if keep_prob <= 0.0 || (keep_prob < 1.0 && rng.gen::<f32>() >= keep_prob) {
                 return true;
             }
+        }
+        if self.config.filtered && (is_capturing_move(entry) || is_in_check(entry)) {
+            return true;
         }
         if self.config.simple_eval_skipping > 0
             && simple_eval(&entry.pos).abs() < self.config.simple_eval_skipping
@@ -671,15 +671,15 @@ impl SkipDecider {
         self.piece_count_history_all_total += 1.0;
 
         if (self.piece_count_history_all_total as u64).is_multiple_of(10_000) {
-            let current_weight = desired_piece_count_weight(self.config, piece_count as i32);
             let mut pass =
                 self.piece_count_history_all_total * self.desired_piece_count_weights_total;
 
-            for _ in 0..=32 {
-                if current_weight > 0.0 {
-                    let tmp = self.piece_count_history_all_total * current_weight
+            for i in 0usize..=32 {
+                let weight = desired_piece_count_weight(self.config, i as i32);
+                if weight > 0.0 && self.piece_count_history_all[i] > 0.0 {
+                    let tmp = self.piece_count_history_all_total * weight
                         / (self.desired_piece_count_weights_total
-                            * self.piece_count_history_all[piece_count]);
+                            * self.piece_count_history_all[i]);
                     if tmp < pass {
                         pass = tmp;
                     }

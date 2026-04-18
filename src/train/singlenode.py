@@ -17,7 +17,6 @@ def make_train_source(args: SingleNodeTrainingConfig) -> TrainBatchSource:
         config=args.loader_skip_config(),
         shuffle_buffer_entries=args.shuffle_buffer_entries,
         pin_memory=args.pin_memory,
-        encode_threads=args.encode_threads,
     )
     return TrainBatchSource(batches=batches)
 

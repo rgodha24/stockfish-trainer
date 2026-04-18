@@ -41,6 +41,16 @@ def resolve_total_threads(loader_threads: int) -> int:
     return max(1, cpu_count - 1)
 
 
+def _auto_thread_counts(total_threads: int) -> tuple[int, int]:
+    encode_threads = max(1, (total_threads + 15) // 16)
+    decode_threads = max(1, total_threads - encode_threads)
+    return decode_threads, encode_threads
+
+
+def _default_slab_count(encode_threads: int) -> int:
+    return max(8, encode_threads + max(4, encode_threads // 2))
+
+
 class SparseBatchTensorizer:
     def __init__(self, *, pin_memory: bool = False):
         self.pin_memory = pin_memory
@@ -107,6 +117,7 @@ class RustSparseBatchProvider:
         total_threads: int,
         decode_threads: int | None,
         encode_threads: int | None,
+        slab_count: int | None,
         shuffle_buffer_entries: int,
         config: DataloaderSkipConfig,
         pin_memory: bool,
@@ -120,7 +131,7 @@ class RustSparseBatchProvider:
             total_threads=total_threads,
             decode_threads=decode_threads,
             encode_threads=encode_threads,
-            slab_count=None,
+            slab_count=slab_count,
             shuffle_buffer_entries=shuffle_buffer_entries,
             seed=None,
             cyclic=cyclic,
@@ -165,7 +176,6 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         pin_memory: bool = False,
         rank: int | None = None,
         world_size: int | None = None,
-        encode_threads: int = 0,
     ):
         super().__init__()
         self.feature_set = feature_set
@@ -178,12 +188,10 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         self.pin_memory = pin_memory
         self.rank, self.world_size = _infer_world(rank, world_size)
 
-        if encode_threads > 0:
-            self.encode_threads = max(1, int(encode_threads))
-            self.decode_threads = max(1, self.total_threads - self.encode_threads)
-        else:
-            self.encode_threads = None
-            self.decode_threads = None
+        self.decode_threads, self.encode_threads = _auto_thread_counts(
+            self.total_threads
+        )
+        self.slab_count = _default_slab_count(self.encode_threads)
 
     def __iter__(self):
         return RustSparseBatchProvider(
@@ -194,6 +202,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
             total_threads=self.total_threads,
             decode_threads=self.decode_threads,
             encode_threads=self.encode_threads,
+            slab_count=self.slab_count,
             shuffle_buffer_entries=self.shuffle_buffer_entries,
             config=self.config,
             pin_memory=self.pin_memory,
@@ -213,7 +222,6 @@ def make_sparse_batch_dataset(
     pin_memory: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
-    encode_threads: int = 0,
 ) -> SparseBatchDataset:
     resolved_config = config if config is not None else DataloaderSkipConfig()
     return SparseBatchDataset(
@@ -227,5 +235,4 @@ def make_sparse_batch_dataset(
         pin_memory=pin_memory,
         rank=rank,
         world_size=world_size,
-        encode_threads=encode_threads,
     )

@@ -48,9 +48,9 @@ class BaseTrainingConfig:
 
     epoch_size: int = 100_000_000
     loader_threads: int = -1
-    encode_threads: int = 0
     shuffle_buffer_entries: int = 16384
     pin_memory: bool = True
+    data_loader_queue_size: int = 16
 
     seed: int = 42
     default_root_dir: str = "logs"
@@ -67,10 +67,10 @@ class BaseTrainingConfig:
             raise ValueError(
                 "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."
             )
-        if self.encode_threads < 0:
-            raise ValueError("`encode_threads` must be non-negative.")
         if self.shuffle_buffer_entries < 0:
             raise ValueError("`shuffle_buffer_entries` must be non-negative.")
+        if self.data_loader_queue_size <= 0:
+            raise ValueError("`data_loader_queue_size` must be positive.")
         if self.checkpoint_every_epochs < 0:
             raise ValueError("`checkpoint_every_epochs` must be non-negative.")
 
@@ -112,6 +112,8 @@ class MultiNodeTrainingConfig(BaseTrainingConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.encode_threads <= 0:
+            raise ValueError("`encode_threads` must be positive.")
         if self.feeder_count <= 0:
             raise ValueError("`feeder_count` must be positive.")
         if self.feeder_cpus <= 0:

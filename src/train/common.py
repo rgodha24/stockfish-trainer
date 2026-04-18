@@ -247,16 +247,20 @@ def run_training(
         config=asdict(args),
     )
 
+    num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
     checkpoint_dir = os.path.join(args.default_root_dir, "checkpoints")
     final_epoch = start_epoch - 1
-    device_batches = iter_device_batches(source.batches, device)
+    device_batches = iter_device_batches(
+        source.batches,
+        device,
+        queue_size_limit=args.data_loader_queue_size,
+    )
 
     try:
         for epoch in range(start_epoch, args.max_epochs):
             model.train()
             epoch_loss_sum = 0.0
             epoch_start = time.time()
-            num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
             processed_batches = 0
             loader_start = source.metrics() if source.metrics is not None else None
 
@@ -384,6 +388,11 @@ def run_training(
         )
         print(f"saved final checkpoint {final_path}", flush=True)
     finally:
-        if source.close is not None:
-            source.close()
-        run.finish()
+        try:
+            if source.close is not None:
+                source.close()
+        finally:
+            close_batches = getattr(device_batches, "close", None)
+            if callable(close_batches):
+                close_batches()
+            run.finish()

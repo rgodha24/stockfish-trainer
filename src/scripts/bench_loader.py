@@ -13,8 +13,8 @@ from tyro.conf import Positional
 from src.data import (
     Batch,
     DataloaderSkipConfig,
+    SparseBatchDataset,
     make_sparse_batch_dataset,
-    resolve_total_threads,
 )
 
 
@@ -24,7 +24,6 @@ class BenchLoaderConfig:
     batch_size: int = 65536
     features: str = "Full_Threats+HalfKAv2_hm^"
     loader_threads: int = -1
-    encode_threads: int = 0
     shuffle_buffer_entries: int = 16384
     filtered: bool = True
     wld_filtered: bool = True
@@ -45,8 +44,6 @@ class BenchLoaderConfig:
             raise ValueError("`batch_size` must be positive.")
         if self.loader_threads == 0:
             raise ValueError("`loader_threads` must be positive or -1 for auto.")
-        if self.encode_threads < 0:
-            raise ValueError("`encode_threads` must be non-negative.")
         if self.shuffle_buffer_entries < 0:
             raise ValueError("`shuffle_buffer_entries` must be non-negative.")
         if self.warmup_batches < 0:
@@ -87,7 +84,7 @@ def resolve_binpack_paths(paths: Iterable[str]) -> tuple[list[str], list[str]]:
     return sorted(set(resolved)), ignored
 
 
-def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> Iterable[Batch]:
+def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> SparseBatchDataset:
     return make_sparse_batch_dataset(
         feature_set=cfg.features,
         filenames=files,
@@ -97,7 +94,6 @@ def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> Iterable[Batch]:
         config=cfg.loader_skip_config(),
         shuffle_buffer_entries=cfg.shuffle_buffer_entries,
         pin_memory=False,
-        encode_threads=cfg.encode_threads,
     )
 
 
@@ -117,13 +113,6 @@ def consume_batches(iterator: Iterator[Batch], batch_count: int) -> tuple[int, i
 def main() -> None:
     cfg = tyro.cli(BenchLoaderConfig)
     files, ignored = resolve_binpack_paths(cfg.datasets)
-    total_threads = resolve_total_threads(cfg.loader_threads)
-    decode_threads = "auto"
-    encode_threads = "auto"
-    if cfg.encode_threads > 0:
-        encode_threads = str(cfg.encode_threads)
-        decode_threads = str(max(1, total_threads - cfg.encode_threads))
-
     loader = make_loader(cfg, files)
     iterator = iter(loader)
 
@@ -137,9 +126,9 @@ def main() -> None:
     print(
         "cpu_only=True files={} total_threads={} decode_threads={} encode_threads={} batch_size={} features={}".format(
             len(files),
-            total_threads,
-            decode_threads,
-            encode_threads,
+            loader.total_threads,
+            loader.decode_threads,
+            loader.encode_threads,
             cfg.batch_size,
             cfg.features,
         ),
