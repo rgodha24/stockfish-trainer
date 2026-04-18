@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import os
 import random
-import shutil
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
+import ranger22
 import torch
 
-import wandb
 from src.data import Batch, iter_device_batches
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.train.config import BaseTrainingConfig
+from src.train.log import TrainingLogger
 
 LoaderMetricsFn = Callable[[], dict[str, float | int]]
 
@@ -20,8 +20,8 @@ LoaderMetricsFn = Callable[[], dict[str, float | int]]
 @dataclass(slots=True)
 class TrainBatchSource:
     batches: Iterable[Batch]
-    metrics: LoaderMetricsFn | None = None
-    close: Callable[[], None] | None = None
+    metrics: LoaderMetricsFn
+    close: Callable[[], None]
 
 
 def ensure_datasets_exist(paths: Iterable[str]) -> None:
@@ -123,7 +123,7 @@ def build_training_state(
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
-    optimizer = __import__("ranger22").Ranger22(
+    optimizer = ranger22.Ranger22(
         model.parameters(),
         lr=args.lr,
         betas=(0.9, 0.999),
@@ -182,52 +182,6 @@ def restore_training_checkpoint(
     return start_epoch, global_step
 
 
-def _loader_metric_delta(
-    start: dict[str, float | int] | None,
-    end: dict[str, float | int] | None,
-    key: str,
-) -> float | int | None:
-    if start is None or end is None or key not in start or key not in end:
-        return None
-    return end[key] - start[key]
-
-
-def build_loader_metrics(
-    start: dict[str, float | int] | None,
-    end: dict[str, float | int] | None,
-    elapsed: float,
-) -> dict[str, float | int]:
-    metrics: dict[str, float | int] = {}
-    encoded_entries = _loader_metric_delta(start, end, "encoded_entries")
-    received_entries = _loader_metric_delta(start, end, "received_entries")
-    received_bytes = _loader_metric_delta(start, end, "received_bytes")
-    wait_sec = _loader_metric_delta(start, end, "wait_sec")
-    get_sec = _loader_metric_delta(start, end, "get_sec")
-
-    if encoded_entries is not None:
-        metrics["loader/encoded_positions_per_sec"] = encoded_entries / max(
-            elapsed, 1e-9
-        )
-    if received_entries is not None:
-        metrics["loader/received_positions_per_sec"] = received_entries / max(
-            elapsed, 1e-9
-        )
-    if received_bytes is not None:
-        metrics["loader/recv_gib_per_sec"] = (
-            received_bytes / max(elapsed, 1e-9) / (1024**3)
-        )
-    if wait_sec is not None:
-        metrics["loader/wait_fraction"] = wait_sec / max(elapsed, 1e-9)
-    if get_sec is not None:
-        metrics["loader/get_fraction"] = get_sec / max(elapsed, 1e-9)
-
-    if end is not None:
-        for key in ("pending_batches", "inflight_calls", "encoded_batches"):
-            if key in end:
-                metrics[f"loader/{key}"] = end[key]
-    return metrics
-
-
 def run_training(
     args: BaseTrainingConfig,
     source: TrainBatchSource,
@@ -244,14 +198,9 @@ def run_training(
         build_training_state(args, device)
     )
 
-    run = wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_run_name,
-        config=asdict(args),
-    )
+    logger = TrainingLogger(args)
 
     num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
-    checkpoint_dir = os.path.join(args.default_root_dir, "checkpoints")
     final_epoch = start_epoch - 1
     device_batches = iter_device_batches(
         source.batches,
@@ -265,7 +214,7 @@ def run_training(
             epoch_loss_sum = 0.0
             epoch_start = time.time()
             processed_batches = 0
-            loader_start = source.metrics() if source.metrics is not None else None
+            logger.start_epoch(source.metrics() if source.metrics is not None else None)
 
             for batch_idx, batch in enumerate(device_batches):
                 if batch_idx >= num_batches:
@@ -288,7 +237,7 @@ def run_training(
                 ) = batch
 
                 optimizer.zero_grad(set_to_none=True)
-                scorenet, router_loss = compiled_model(
+                scorenet, log_dict = compiled_model(
                     us,
                     them,
                     white_indices,
@@ -298,6 +247,7 @@ def run_training(
                     psqt_indices,
                     layer_stack_indices,
                 )
+                router_loss = logger.on_batch(log_dict, scorenet)
                 scorenet = scorenet * model.quantization.nnue2score
                 loss = compute_loss(scorenet, outcome, score, args, epoch)
                 loss = loss + router_loss
@@ -308,15 +258,12 @@ def run_training(
                 epoch_loss_sum += loss_value
                 global_step += 1
                 processed_batches += 1
-
-                if (
-                    batch_idx % max(1, num_batches // 4) == 0
-                    or batch_idx == num_batches - 1
-                ):
-                    print(
-                        f"epoch={epoch:03d} step={batch_idx + 1}/{num_batches} loss={loss_value:.6f}",
-                        flush=True,
-                    )
+                logger.log_step(
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    num_batches=num_batches,
+                    loss_value=loss_value,
+                )
 
             scheduler.step()
             if processed_batches == 0:
@@ -325,70 +272,44 @@ def run_training(
             lr = optimizer.param_groups[0]["lr"]
             epoch_loss = epoch_loss_sum / processed_batches
             final_epoch = epoch
-
-            metrics: dict[str, Any] = {
-                "train/epoch": epoch,
-                "train/loss_epoch": epoch_loss,
-                "train/lr": lr,
-                "train/epoch_time_sec": elapsed,
-                "train/it_per_sec": processed_batches / elapsed,
-                "train/positions_per_sec": (processed_batches * args.batch_size)
-                / elapsed,
-            }
-
-            loader_end = source.metrics() if source.metrics is not None else None
-            metrics.update(build_loader_metrics(loader_start, loader_end, elapsed))
-
-            print(
-                f"epoch={epoch:03d} done loss={epoch_loss:.6f} lr={lr:.8g} time={elapsed:.1f}s it/s={processed_batches / elapsed:.1f} pos/s={(processed_batches * args.batch_size) / elapsed:.0f}",
-                flush=True,
+            logger.finish_epoch(
+                epoch=epoch,
+                epoch_loss=epoch_loss,
+                lr=lr,
+                elapsed=elapsed,
+                processed_batches=processed_batches,
+                global_step=global_step,
+                loader_end=source.metrics() if source.metrics is not None else None,
             )
-            if loader_end is not None:
-                encoded_pos_per_sec = metrics.get("loader/encoded_positions_per_sec")
-                wait_fraction = metrics.get("loader/wait_fraction")
-                print(
-                    "loader encoded_pos/s={} wait={:.1f}% pending_batches={} inflight={}".format(
-                        f"{encoded_pos_per_sec:.0f}"
-                        if encoded_pos_per_sec is not None
-                        else "n/a",
-                        float(wait_fraction or 0.0) * 100.0,
-                        int(loader_end.get("pending_batches", 0)),
-                        int(loader_end.get("inflight_calls", 0)),
-                    ),
-                    flush=True,
-                )
-
-            wandb.log(metrics, step=global_step)
 
             if (
                 args.checkpoint_every_epochs > 0
                 and (epoch + 1) % args.checkpoint_every_epochs == 0
             ):
-                last_path = os.path.join(checkpoint_dir, "last.pt")
-                epoch_path = os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pt")
-                save_training_checkpoint(
-                    epoch_path,
+                logger.save_periodic_checkpoint(
                     epoch=epoch,
-                    global_step=global_step,
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    args=args,
+                    save_fn=lambda path: save_training_checkpoint(
+                        path,
+                        epoch=epoch,
+                        global_step=global_step,
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        args=args,
+                    ),
                 )
-                shutil.copyfile(epoch_path, last_path)
-                print(f"saved checkpoints {epoch_path} -> {last_path}", flush=True)
 
-        final_path = os.path.join(checkpoint_dir, "final.pt")
-        save_training_checkpoint(
-            final_path,
-            epoch=max(final_epoch, 0),
-            global_step=global_step,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            args=args,
+        logger.save_final_checkpoint(
+            save_fn=lambda path: save_training_checkpoint(
+                path,
+                epoch=max(final_epoch, 0),
+                global_step=global_step,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                args=args,
+            )
         )
-        print(f"saved final checkpoint {final_path}", flush=True)
     finally:
         try:
             if source.close is not None:
@@ -397,4 +318,4 @@ def run_training(
             close_batches = getattr(device_batches, "close", None)
             if callable(close_batches):
                 close_batches()
-            run.finish()
+            logger.finish()

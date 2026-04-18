@@ -51,7 +51,7 @@ class LayerStacks(nn.Module):
         l3c_ = self.output(l2x_, ls_indices)
         l3x_ = l3c_ + l1x_out
 
-        return l3x_, x.new_zeros(())
+        return l3x_, {}
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(

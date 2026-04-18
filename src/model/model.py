@@ -147,7 +147,8 @@ class NNUEModel(nn.Module):
         psqt = (wpsqt - bpsqt) * (us - 0.5)
 
         if self.stacks == "moe":
-            stacks_out, router_loss = self.layer_stacks(l0_, router_input)
+            stacks_out, log_dict = self.layer_stacks(l0_, router_input)
+            return stacks_out + psqt, log_dict
         else:
-            stacks_out, router_loss = self.layer_stacks(l0_, layer_stack_indices)
-        return stacks_out + psqt, router_loss
+            stacks_out, log_dict = self.layer_stacks(l0_, layer_stack_indices)
+            return stacks_out + psqt, log_dict

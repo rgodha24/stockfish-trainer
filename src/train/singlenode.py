@@ -18,7 +18,7 @@ def make_train_source(args: SingleNodeTrainingConfig) -> TrainBatchSource:
         shuffle_buffer_entries=args.shuffle_buffer_entries,
         pin_memory=args.pin_memory,
     )
-    return TrainBatchSource(batches=batches)
+    return TrainBatchSource(batches=batches, metrics=lambda: dict(), close=lambda: None)
 
 
 def main() -> None:

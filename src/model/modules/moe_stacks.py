@@ -1,3 +1,4 @@
+import math
 from typing import Generator
 
 import torch
@@ -72,7 +73,7 @@ class MoELayerStacks(nn.Module):
 
     def forward(
         self, expert_input: torch.Tensor, router_input: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         gate_logits = self.router(router_input.float())
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
@@ -83,6 +84,11 @@ class MoELayerStacks(nn.Module):
         avg_gate_prob = gate_probs.mean(dim=0)
         aux_loss = self.num_experts * (fraction_routed * avg_gate_prob).sum()
         z_loss = torch.logsumexp(gate_logits, dim=-1).square().mean()
+        entropy = -(gate_probs * gate_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
+        normalized_entropy = entropy / gate_probs.new_tensor(
+            math.log(max(self.num_experts, 2))
+        )
+        top1_prob = gate_probs.max(dim=-1).values.mean()
         router_loss = expert_input.new_zeros(())
         if self.training:
             router_loss = expert_input.new_tensor(self.aux_loss_alpha) * aux_loss
@@ -116,7 +122,15 @@ class MoELayerStacks(nn.Module):
             l3c_ = self.output(l2x_, expert_indices)
             l3x_ = l3c_ + l1x_out
 
-        return l3x_, router_loss
+        return l3x_, {
+            "routing/router_loss": router_loss,
+            "routing/aux_loss": aux_loss,
+            "routing/z_loss": z_loss,
+            "routing/fraction_routed": fraction_routed,
+            "routing/avg_gate_prob": avg_gate_prob,
+            "routing/entropy": normalized_entropy,
+            "routing/top1_prob": top1_prob,
+        }
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(
