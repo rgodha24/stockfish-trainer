@@ -8,12 +8,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 import torch
-import wandb
 
+import wandb
 from src.data import Batch, iter_device_batches
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.train.config import BaseTrainingConfig
-
 
 LoaderMetricsFn = Callable[[], dict[str, float | int]]
 
@@ -116,7 +115,11 @@ def build_training_state(
         L1=args.l1,
         L2=args.l2,
         L3=args.l3,
-        layer_stacks=args.layer_stacks,
+        stacks=args.stacks,
+        num_experts=args.num_experts,
+        router_features=args.router_features,
+        aux_loss_alpha=args.aux_loss_alpha,
+        z_loss_alpha=args.z_loss_alpha,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
@@ -285,20 +288,19 @@ def run_training(
                 ) = batch
 
                 optimizer.zero_grad(set_to_none=True)
-                scorenet = (
-                    compiled_model(
-                        us,
-                        them,
-                        white_indices,
-                        white_values,
-                        black_indices,
-                        black_values,
-                        psqt_indices,
-                        layer_stack_indices,
-                    )
-                    * model.quantization.nnue2score
+                scorenet, router_loss = compiled_model(
+                    us,
+                    them,
+                    white_indices,
+                    white_values,
+                    black_indices,
+                    black_values,
+                    psqt_indices,
+                    layer_stack_indices,
                 )
+                scorenet = scorenet * model.quantization.nnue2score
                 loss = compute_loss(scorenet, outcome, score, args, epoch)
+                loss = loss + router_loss
                 loss.backward()
                 optimizer.step()
 

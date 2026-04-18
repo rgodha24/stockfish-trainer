@@ -3,13 +3,13 @@ from typing import Generator
 import torch
 from torch import nn
 
+from .config import LayerStacksConfig
 from .stacked_linear import (
     FactorizedSharedLinear,
     FactorizedStackedLinear,
     SharedLinear,
     StackedLinear,
 )
-from .config import LayerStacksConfig
 
 
 class LayerStacks(nn.Module):
@@ -20,13 +20,12 @@ class LayerStacks(nn.Module):
         self.L1 = config.L1
         self.L2 = config.L2
         self.L3 = config.L3
-        self.use_layer_stacks = config.layer_stacks
 
         # Factorizer only for the first layer because later
         # there's a non-linearity and factorization breaks.
         # This is by design. The weights in the further layers should be
         # able to diverge a lot.
-        if self.use_layer_stacks:
+        if config.stacks == "layer":
             self.l1 = FactorizedStackedLinear(2 * self.L1 // 2, self.L2 + 1, count)
             self.l2 = StackedLinear(self.L2 * 2, self.L3, count)
             self.output = StackedLinear(self.L3, 1, count)
@@ -52,7 +51,7 @@ class LayerStacks(nn.Module):
         l3c_ = self.output(l2x_, ls_indices)
         l3x_ = l3c_ + l1x_out
 
-        return l3x_
+        return l3x_, x.new_zeros(())
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(
