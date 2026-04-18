@@ -4,18 +4,25 @@ import os
 import random
 import shutil
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 import torch
 import wandb
 
+from src.data import Batch, iter_device_batches
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.train.config import BaseTrainingConfig
 
 
-Batch = tuple[torch.Tensor, ...]
 LoaderMetricsFn = Callable[[], dict[str, float | int]]
+
+
+@dataclass(slots=True)
+class TrainBatchSource:
+    batches: Iterable[Batch]
+    metrics: LoaderMetricsFn | None = None
+    close: Callable[[], None] | None = None
 
 
 def ensure_datasets_exist(paths: Iterable[str]) -> None:
@@ -92,34 +99,6 @@ def compute_loss(
         args.w2,
     )
     return (loss * weights).sum() / weights.sum()
-
-
-def move_batch_to_device(batch: Batch, device: torch.device) -> Batch:
-    (
-        us,
-        them,
-        white_indices,
-        white_values,
-        black_indices,
-        black_values,
-        outcome,
-        score,
-        psqt_indices,
-        layer_stack_indices,
-    ) = batch
-
-    return (
-        us.to(device, non_blocking=True),
-        them.to(device, non_blocking=True),
-        white_indices.to(device, non_blocking=True, dtype=torch.int32),
-        white_values.to(device, non_blocking=True),
-        black_indices.to(device, non_blocking=True, dtype=torch.int32),
-        black_values.to(device, non_blocking=True),
-        outcome.to(device, non_blocking=True),
-        score.to(device, non_blocking=True),
-        psqt_indices.to(device, non_blocking=True, dtype=torch.int64),
-        layer_stack_indices.to(device, non_blocking=True, dtype=torch.int64),
-    )
 
 
 def build_training_state(
@@ -248,10 +227,7 @@ def build_loader_metrics(
 
 def run_training(
     args: BaseTrainingConfig,
-    train_loader: Iterable[Batch],
-    *,
-    loader_metrics_fn: LoaderMetricsFn | None = None,
-    loader_close_fn: Callable[[], None] | None = None,
+    source: TrainBatchSource,
 ) -> None:
     ensure_datasets_exist(args.datasets)
     os.makedirs(args.default_root_dir, exist_ok=True)
@@ -273,6 +249,7 @@ def run_training(
 
     checkpoint_dir = os.path.join(args.default_root_dir, "checkpoints")
     final_epoch = start_epoch - 1
+    device_batches = iter_device_batches(source.batches, device)
 
     try:
         for epoch in range(start_epoch, args.max_epochs):
@@ -281,11 +258,9 @@ def run_training(
             epoch_start = time.time()
             num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
             processed_batches = 0
-            loader_start = (
-                loader_metrics_fn() if loader_metrics_fn is not None else None
-            )
+            loader_start = source.metrics() if source.metrics is not None else None
 
-            for batch_idx, batch in enumerate(train_loader):
+            for batch_idx, batch in enumerate(device_batches):
                 if batch_idx >= num_batches:
                     break
                 if batch_idx == 0:
@@ -303,7 +278,7 @@ def run_training(
                     score,
                     psqt_indices,
                     layer_stack_indices,
-                ) = move_batch_to_device(batch, device)
+                ) = batch
 
                 optimizer.zero_grad(set_to_none=True)
                 scorenet = (
@@ -355,7 +330,7 @@ def run_training(
                 / elapsed,
             }
 
-            loader_end = loader_metrics_fn() if loader_metrics_fn is not None else None
+            loader_end = source.metrics() if source.metrics is not None else None
             metrics.update(build_loader_metrics(loader_start, loader_end, elapsed))
 
             print(
@@ -409,6 +384,6 @@ def run_training(
         )
         print(f"saved final checkpoint {final_path}", flush=True)
     finally:
-        if loader_close_fn is not None:
-            loader_close_fn()
+        if source.close is not None:
+            source.close()
         run.finish()

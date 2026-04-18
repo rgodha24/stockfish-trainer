@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import tyro
-from torch.utils.data import DataLoader
 
 from src.data import make_sparse_batch_dataset
-from src.train.common import run_training
+from src.train.common import TrainBatchSource, run_training
 from src.train.config import SingleNodeTrainingConfig
 
 
-def make_train_loader(args: SingleNodeTrainingConfig) -> DataLoader:
-    stream = make_sparse_batch_dataset(
+def make_train_source(args: SingleNodeTrainingConfig) -> TrainBatchSource:
+    batches = make_sparse_batch_dataset(
         feature_set=args.features,
         filenames=list(args.datasets),
         batch_size=args.batch_size,
@@ -20,18 +19,12 @@ def make_train_loader(args: SingleNodeTrainingConfig) -> DataLoader:
         pin_memory=args.pin_memory,
         encode_threads=args.encode_threads,
     )
-    return DataLoader(
-        stream,
-        batch_size=None,
-        batch_sampler=None,
-        num_workers=0,
-        pin_memory=False,
-    )
+    return TrainBatchSource(batches=batches)
 
 
 def main() -> None:
     args = tyro.cli(SingleNodeTrainingConfig)
-    run_training(args, make_train_loader(args))
+    run_training(args, make_train_source(args))
 
 
 if __name__ == "__main__":

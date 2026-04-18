@@ -8,10 +8,10 @@ from typing import Iterable, Iterator
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import tyro
-from torch.utils.data import DataLoader
 from tyro.conf import Positional
 
 from src.data import (
+    Batch,
     DataloaderSkipConfig,
     make_sparse_batch_dataset,
     resolve_total_threads,
@@ -87,8 +87,8 @@ def resolve_binpack_paths(paths: Iterable[str]) -> tuple[list[str], list[str]]:
     return sorted(set(resolved)), ignored
 
 
-def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> DataLoader:
-    dataset = make_sparse_batch_dataset(
+def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> Iterable[Batch]:
+    return make_sparse_batch_dataset(
         feature_set=cfg.features,
         filenames=files,
         batch_size=cfg.batch_size,
@@ -99,16 +99,9 @@ def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> DataLoader:
         pin_memory=False,
         encode_threads=cfg.encode_threads,
     )
-    return DataLoader(
-        dataset,
-        batch_size=None,
-        batch_sampler=None,
-        num_workers=0,
-        pin_memory=False,
-    )
 
 
-def consume_batches(iterator: Iterator[tuple], batch_count: int) -> tuple[int, int]:
+def consume_batches(iterator: Iterator[Batch], batch_count: int) -> tuple[int, int]:
     batches = 0
     positions = 0
     while batches < batch_count:

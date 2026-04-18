@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import torch
 
@@ -17,6 +18,9 @@ class DataloaderSkipConfig:
     pc_y1: float = 1.0
     pc_y2: float = 2.0
     pc_y3: float = 1.0
+
+
+Batch: TypeAlias = tuple[torch.Tensor, ...]
 
 
 def _infer_world(rank: int | None, world_size: int | None) -> tuple[int, int]:
@@ -64,7 +68,7 @@ class SparseBatchTensorizer:
             self._ones_buffer = ones
         return self._ones_buffer[:rows]
 
-    def to_tuple(self, batch: dict[str, object]) -> tuple[torch.Tensor, ...]:
+    def to_tuple(self, batch: dict[str, object]) -> Batch:
         us = self._maybe_pin(torch.from_numpy(batch["is_white"]))
         them = self._maybe_pin(1.0 - us)
         white_indices = self._maybe_pin(torch.from_numpy(batch["white"]))
@@ -156,7 +160,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         batch_size: int,
         cyclic: bool = True,
         loader_threads: int = -1,
-        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        config: DataloaderSkipConfig | None = None,
         shuffle_buffer_entries: int = 16384,
         pin_memory: bool = False,
         rank: int | None = None,
@@ -170,7 +174,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         self.cyclic = cyclic
         self.total_threads = resolve_total_threads(loader_threads)
         self.shuffle_buffer_entries = int(shuffle_buffer_entries)
-        self.config = config
+        self.config = config if config is not None else DataloaderSkipConfig()
         self.pin_memory = pin_memory
         self.rank, self.world_size = _infer_world(rank, world_size)
 
@@ -204,20 +208,21 @@ def make_sparse_batch_dataset(
     batch_size: int,
     cyclic: bool = True,
     loader_threads: int = -1,
-    config: DataloaderSkipConfig = DataloaderSkipConfig(),
+    config: DataloaderSkipConfig | None = None,
     shuffle_buffer_entries: int = 16384,
     pin_memory: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
     encode_threads: int = 0,
 ) -> SparseBatchDataset:
+    resolved_config = config if config is not None else DataloaderSkipConfig()
     return SparseBatchDataset(
         feature_set=feature_set,
         filenames=filenames,
         batch_size=batch_size,
         cyclic=cyclic,
         loader_threads=loader_threads,
-        config=config,
+        config=resolved_config,
         shuffle_buffer_entries=shuffle_buffer_entries,
         pin_memory=pin_memory,
         rank=rank,
