@@ -25,6 +25,7 @@ class BenchLoaderConfig:
     features: str = "Full_Threats+HalfKAv2_hm^"
     loader_threads: int = -1
     shuffle_buffer_entries: int = 16384
+    prefetch_batches: int = 16
     filtered: bool = True
     wld_filtered: bool = True
     random_fen_skipping: int = 0
@@ -46,6 +47,8 @@ class BenchLoaderConfig:
             raise ValueError("`loader_threads` must be positive or -1 for auto.")
         if self.shuffle_buffer_entries < 0:
             raise ValueError("`shuffle_buffer_entries` must be non-negative.")
+        if self.prefetch_batches <= 0:
+            raise ValueError("`prefetch_batches` must be positive.")
         if self.warmup_batches < 0:
             raise ValueError("`warmup_batches` must be non-negative.")
         if self.measure_batches <= 0:
@@ -93,6 +96,7 @@ def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> SparseBatchDataset:
         loader_threads=cfg.loader_threads,
         config=cfg.loader_skip_config(),
         shuffle_buffer_entries=cfg.shuffle_buffer_entries,
+        prefetch_batches=cfg.prefetch_batches,
         pin_memory=False,
     )
 

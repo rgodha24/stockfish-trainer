@@ -119,12 +119,13 @@ class RustSparseBatchProvider:
         encode_threads: int | None,
         slab_count: int | None,
         shuffle_buffer_entries: int,
+        prefetch_batches: int,
         config: DataloaderSkipConfig,
         pin_memory: bool,
         rank: int,
         world_size: int,
     ):
-        self._stream = rust.BatchStream(
+        self._stream = rust.PrefetchBatchStream(
             feature_set.replace("^", ""),
             list(filenames),
             batch_size,
@@ -146,8 +147,9 @@ class RustSparseBatchProvider:
             pc_y3=float(config.pc_y3),
             rank=rank,
             world_size=world_size,
+            prefetch_batches=prefetch_batches,
+            pin_memory=pin_memory,
         )
-        self._tensorizer = SparseBatchTensorizer(pin_memory=pin_memory)
 
     def __iter__(self):
         return self
@@ -156,7 +158,7 @@ class RustSparseBatchProvider:
         batch = self._stream.next_batch()
         if batch is None:
             raise StopIteration
-        return self._tensorizer.to_tuple(batch)
+        return batch
 
     def __del__(self):
         if hasattr(self, "_stream"):
@@ -173,6 +175,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         loader_threads: int = -1,
         config: DataloaderSkipConfig | None = None,
         shuffle_buffer_entries: int = 16384,
+        prefetch_batches: int = 16,
         pin_memory: bool = False,
         rank: int | None = None,
         world_size: int | None = None,
@@ -184,6 +187,9 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         self.cyclic = cyclic
         self.total_threads = resolve_total_threads(loader_threads)
         self.shuffle_buffer_entries = int(shuffle_buffer_entries)
+        self.prefetch_batches = int(prefetch_batches)
+        if self.prefetch_batches <= 0:
+            raise ValueError("`prefetch_batches` must be positive.")
         self.config = config if config is not None else DataloaderSkipConfig()
         self.pin_memory = pin_memory
         self.rank, self.world_size = _infer_world(rank, world_size)
@@ -204,6 +210,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
             encode_threads=self.encode_threads,
             slab_count=self.slab_count,
             shuffle_buffer_entries=self.shuffle_buffer_entries,
+            prefetch_batches=self.prefetch_batches,
             config=self.config,
             pin_memory=self.pin_memory,
             rank=self.rank,
@@ -219,6 +226,7 @@ def make_sparse_batch_dataset(
     loader_threads: int = -1,
     config: DataloaderSkipConfig | None = None,
     shuffle_buffer_entries: int = 16384,
+    prefetch_batches: int = 16,
     pin_memory: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
@@ -232,6 +240,7 @@ def make_sparse_batch_dataset(
         loader_threads=loader_threads,
         config=resolved_config,
         shuffle_buffer_entries=shuffle_buffer_entries,
+        prefetch_batches=prefetch_batches,
         pin_memory=pin_memory,
         rank=rank,
         world_size=world_size,
