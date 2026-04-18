@@ -47,7 +47,12 @@ class MoELayerStacks(nn.Module):
         stacked_b = layer.linear.bias.reshape(self.num_experts, layer.out_features)
         expert_weight = stacked_w + layer.factorized_linear.weight.unsqueeze(0)
         expert_bias = stacked_b + layer.factorized_linear.bias.unsqueeze(0)
-        return torch.einsum("bi,eoi->beo", x, expert_weight) + expert_bias.unsqueeze(0)
+        out = F.linear(
+            x,
+            expert_weight.reshape(-1, layer.in_features),
+            expert_bias.reshape(-1),
+        )
+        return out.unflatten(-1, (self.num_experts, layer.out_features))
 
     def _stacked_forward_all(
         self, layer: StackedLinear, x: torch.Tensor
@@ -57,10 +62,15 @@ class MoELayerStacks(nn.Module):
         )
         expert_bias = layer.linear.bias.reshape(self.num_experts, layer.out_features)
         if x.dim() == 2:
-            return torch.einsum(
-                "bi,eoi->beo", x, expert_weight
-            ) + expert_bias.unsqueeze(0)
-        return torch.einsum("bei,eoi->beo", x, expert_weight) + expert_bias.unsqueeze(0)
+            out = F.linear(
+                x,
+                expert_weight.reshape(-1, layer.in_features),
+                expert_bias.reshape(-1),
+            )
+            return out.unflatten(-1, (self.num_experts, layer.out_features))
+        return torch.bmm(
+            x.permute(1, 0, 2), expert_weight.transpose(1, 2)
+        ).permute(1, 0, 2) + expert_bias.unsqueeze(0)
 
     def _combine_expert_outputs(
         self, gate: torch.Tensor, stacked_output: torch.Tensor
