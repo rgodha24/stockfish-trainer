@@ -3,6 +3,7 @@ from collections.abc import Callable
 import torch
 import tilelang
 import tilelang.language as T
+from tilelang.autotuner import autotune, set_autotune_inputs
 
 
 SparseInputLinearForwardKernel = Callable[
@@ -13,39 +14,35 @@ SparseInputLinearBackwardKernel = Callable[
 ]
 
 
-def _find_nearest_divisor(value: int, target: int) -> int:
-    divisors = []
-    for i in range(1, value + 1):
-        if value % i == 0:
-            divisors.append((i, abs(target - i)))
-    divisors.sort(key=lambda x: x[1])
-    return divisors[0][0]
+def _divisor_threads(output_size: int, lo: int = 32, hi: int = 1024) -> list[dict]:
+    """Return autotune configs where threads evenly divides output_size.
+
+    TileLang's layout inference segfaults on bounds-check guards, so we
+    only emit configs that guarantee threads * per_thread == output_size.
+    """
+    return [
+        {"threads": t, "per_thread": output_size // t}
+        for t in range(lo, min(hi, output_size) + 1)
+        if output_size % t == 0
+    ]
 
 
-_num_threads_forward_cache: dict[int, int] = {}
+def _forward_configs(*args, **_kwargs):
+    # tilelang 0.1.8 passes (args_tuple, kwargs_tuple) instead of unpacking
+    if args and isinstance(args[0], tuple):
+        max_active_indices, output_size = args[0]
+    else:
+        max_active_indices, output_size = args
+    _ = max_active_indices
+    return _divisor_threads(output_size)
 
 
-def _get_num_threads_for_forward(output_size: int) -> int:
-    optimal_num_threads = 512
-    if output_size not in _num_threads_forward_cache:
-        _num_threads_forward_cache[output_size] = _find_nearest_divisor(
-            output_size, optimal_num_threads
-        )
-
-    return _num_threads_forward_cache[output_size]
-
-
-_num_threads_backward_cache: dict[int, int] = {}
-
-
-def _get_num_threads_for_backward(output_size: int) -> int:
-    optimal_num_threads = 512
-    if output_size not in _num_threads_backward_cache:
-        _num_threads_backward_cache[output_size] = _find_nearest_divisor(
-            output_size, optimal_num_threads
-        )
-
-    return _num_threads_backward_cache[output_size]
+def _backward_configs(*args, **_kwargs):
+    if args and isinstance(args[0], tuple):
+        (output_size,) = args[0]
+    else:
+        (output_size,) = args
+    return _divisor_threads(output_size)
 
 
 _flat_batch_index_cache: dict[tuple[int, int, int], torch.Tensor] = {}
@@ -66,6 +63,7 @@ def _get_flat_batch_indices(
     return _flat_batch_index_cache[key]
 
 
+@autotune(configs=_forward_configs, warmup=5, rep=20, timeout=30, skip_check=True)
 @tilelang.jit
 def _sparse_input_linear_forward_factory(
     max_active_indices, output_size, threads, per_thread
@@ -148,6 +146,7 @@ def _build_sorted_backward_inputs(
     )
 
 
+@autotune(configs=_backward_configs, warmup=5, rep=20, timeout=30, skip_check=True)
 @tilelang.jit
 def _sparse_input_linear_backward_factory(output_size, threads, per_thread):
     batch_size = T.dynamic("batch_size")
@@ -199,9 +198,73 @@ def _sparse_input_linear_backward_factory(output_size, threads, per_thread):
     return kernel
 
 
-class _SortedSparseInputLinearBackwardKernel:
-    def __init__(self, kernel):
-        self.kernel = kernel
+class _LazyForwardKernel:
+    """Autotunes on first real call using actual training tensors."""
+
+    def __init__(self, max_active_indices: int, output_size: int):
+        self._max_active_indices = max_active_indices
+        self._output_size = output_size
+        self._kernel = None
+        self._backward_kernel_ref: _LazyBackwardKernel | None = None
+
+    def __call__(
+        self,
+        input_indices: torch.Tensor,
+        input_values: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        if self._kernel is None:
+            with set_autotune_inputs(input_indices, input_values, weight, bias, output):
+                self._kernel = _sparse_input_linear_forward_factory(
+                    self._max_active_indices, self._output_size
+                )
+            # Also autotune the backward kernel now (main thread) since
+            # loss.backward() runs on autograd threads where signal.alarm
+            # (used by tilelang's timeout) is not available.
+            bwd = self._backward_kernel_ref
+            if bwd is not None and bwd._kernel is None:
+                bwd._autotune_from_forward(input_indices, input_values, weight)
+        self._kernel(input_indices, input_values, weight, bias, output)
+
+
+class _LazyBackwardKernel:
+    """Autotunes on first real call using actual sorted training tensors."""
+
+    def __init__(self, output_size: int):
+        self._output_size = output_size
+        self._kernel = None
+
+    def _autotune_from_forward(
+        self,
+        input_indices: torch.Tensor,
+        input_values: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> None:
+        """Autotune using representative forward-pass tensors (called from main thread)."""
+        flat_batch_indices = _get_flat_batch_indices(
+            input_indices.shape[0], input_indices.shape[1], input_indices.device
+        )
+        sorted_bidx, sorted_val, seg_feat, seg_count, seg_start = (
+            _build_sorted_backward_inputs(
+                input_indices, input_values, flat_batch_indices
+            )
+        )
+        if seg_feat.numel() == 0:
+            return
+        weight_grad = torch.zeros_like(weight)
+        output_grad = torch.randn(
+            input_indices.shape[0], self._output_size,
+            dtype=torch.float32, device=input_indices.device,
+        )
+        with set_autotune_inputs(
+            sorted_bidx, sorted_val, output_grad,
+            seg_start, seg_feat, seg_count, weight_grad,
+        ):
+            self._kernel = _sparse_input_linear_backward_factory(
+                self._output_size
+            )
 
     def __call__(
         self,
@@ -224,55 +287,50 @@ class _SortedSparseInputLinearBackwardKernel:
         if seg_feat.numel() == 0:
             return
 
-        self.kernel(
-            sorted_bidx,
-            sorted_val,
-            output_grad,
-            seg_start,
-            seg_feat,
-            seg_count,
-            weight_grad,
+        if self._kernel is None:
+            # Fallback: compile with best heuristic if not autotuned from forward
+            best = _divisor_threads(self._output_size)[-1]
+            self._kernel = _sparse_input_linear_backward_factory(
+                self._output_size, best["threads"], best["per_thread"]
+            )
+
+        self._kernel(
+            sorted_bidx, sorted_val, output_grad,
+            seg_start, seg_feat, seg_count, weight_grad,
         )
 
 
-_sparse_input_linear_forward_kernel_cache: dict[
-    tuple[int, int, int], SparseInputLinearForwardKernel
-] = {}
+_forward_kernel_cache: dict[tuple[int, int], _LazyForwardKernel] = {}
+
+
+_backward_kernel_cache: dict[tuple[int, int], _LazyBackwardKernel] = {}
+
+
+def _get_or_create_backward_kernel(
+    max_active_indices: int, output_size: int
+) -> _LazyBackwardKernel:
+    key = (max_active_indices, output_size)
+    if key not in _backward_kernel_cache:
+        _backward_kernel_cache[key] = _LazyBackwardKernel(output_size)
+    return _backward_kernel_cache[key]
 
 
 @torch.compiler.disable(recursive=False)
 def make_sparse_input_linear_forward_kernel(
     max_active_indices: int, output_size: int
 ) -> SparseInputLinearForwardKernel:
-    num_threads = _get_num_threads_for_forward(output_size)
-    per_thread = output_size // num_threads
-    key = (max_active_indices, output_size, num_threads)
-    if key not in _sparse_input_linear_forward_kernel_cache:
-        _sparse_input_linear_forward_kernel_cache[key] = (
-            _sparse_input_linear_forward_factory(
-                max_active_indices, output_size, num_threads, per_thread
-            )
+    key = (max_active_indices, output_size)
+    if key not in _forward_kernel_cache:
+        fwd = _LazyForwardKernel(max_active_indices, output_size)
+        fwd._backward_kernel_ref = _get_or_create_backward_kernel(
+            max_active_indices, output_size
         )
-    return _sparse_input_linear_forward_kernel_cache[key]
-
-
-_sparse_input_linear_backward_kernel_cache: dict[
-    tuple[int, int, int], SparseInputLinearBackwardKernel
-] = {}
+        _forward_kernel_cache[key] = fwd
+    return _forward_kernel_cache[key]
 
 
 @torch.compiler.disable(recursive=False)
 def make_sparse_input_linear_backward_kernel(
     max_active_indices: int, output_size: int
 ) -> SparseInputLinearBackwardKernel:
-    num_threads = _get_num_threads_for_backward(output_size)
-    per_thread = output_size // num_threads
-    key = (max_active_indices, output_size, num_threads)
-    if key not in _sparse_input_linear_backward_kernel_cache:
-        kernel = _sparse_input_linear_backward_factory(
-            output_size, num_threads, per_thread
-        )
-        _sparse_input_linear_backward_kernel_cache[key] = (
-            _SortedSparseInputLinearBackwardKernel(kernel)
-        )
-    return _sparse_input_linear_backward_kernel_cache[key]
+    return _get_or_create_backward_kernel(max_active_indices, output_size)
