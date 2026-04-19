@@ -17,13 +17,13 @@ class LayerStacksConfig:
     """Size of third hidden layer."""
     stacks: Stacks = "layer"
     """what types of stacks to use"""
-    num_experts: int = 64
+    num_experts: int = 8
     """number of experts used when stacks='moe'"""
     router_features: int = 32
     """total router-only accumulator features across both perspectives (16 per side by default)"""
     aux_loss_alpha: float = 1e-3
     """Switch-style load-balancing coefficient for MoE routing"""
-    z_loss_alpha: float = 1e-3
+    z_loss_alpha: float = 0.0
     """router z-loss coefficient for MoE routing"""
 
     def __post_init__(self) -> None:

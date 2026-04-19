@@ -21,10 +21,10 @@ class BaseTrainingConfig:
     l2: int = 31
     l3: int = 32
     stacks: Stacks = "layer"
-    num_experts: int = 64
+    num_experts: int = 8
     router_features: int = 32
     aux_loss_alpha: float = 1e-3
-    z_loss_alpha: float = 1e-3
+    z_loss_alpha: float = 0.0
 
     lr: float = 8.75e-4
     gamma: float = 0.992

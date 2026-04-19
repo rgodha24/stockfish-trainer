@@ -109,6 +109,7 @@ class NNUEModel(nn.Module):
             ef = self.eval_features_per_perspective
             l0_ = torch.cat([w_half[:, :ef], b_half[:, :ef]], dim=1)
             router_input = torch.cat([w_half[:, ef:], b_half[:, ef:]], dim=1)
+            router_input = torch.clamp(router_input, 0.0, 1.0)
             pairwise_chunk_size = ef // 2
         else:
             router_input = None

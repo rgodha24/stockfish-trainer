@@ -1011,6 +1011,81 @@ fn scan_chunk_tasks(
         .collect())
 }
 
+// Sidecar chunk-index cache (.chunks files)
+// Format (little-endian): magic[4] | version:u32 | source_file_size:u64 | num_chunks:u32 | [offset:u64, size:u32]*
+
+const SIDECAR_MAGIC: &[u8; 4] = b"CHNK";
+const SIDECAR_VERSION: u32 = 1;
+const SIDECAR_HEADER_SIZE: usize = 4 + 4 + 8 + 4;
+const SIDECAR_ENTRY_SIZE: usize = 8 + 4;
+
+fn sidecar_path(binpack_path: &PathBuf) -> PathBuf {
+    let mut p = binpack_path.as_os_str().to_owned();
+    p.push(".chunks");
+    PathBuf::from(p)
+}
+
+fn load_sidecar_cache(
+    binpack_path: &PathBuf,
+    expected_file_size: u64,
+    file_index: usize,
+) -> Option<Vec<ChunkTask>> {
+    let data = std::fs::read(&sidecar_path(binpack_path)).ok()?;
+
+    if data.len() < SIDECAR_HEADER_SIZE
+        || &data[0..4] != SIDECAR_MAGIC
+        || u32::from_le_bytes(data[4..8].try_into().ok()?) != SIDECAR_VERSION
+        || u64::from_le_bytes(data[8..16].try_into().ok()?) != expected_file_size
+    {
+        return None;
+    }
+
+    let num_chunks = u32::from_le_bytes(data[16..20].try_into().ok()?) as usize;
+    if data.len() != SIDECAR_HEADER_SIZE + num_chunks * SIDECAR_ENTRY_SIZE {
+        return None;
+    }
+
+    let mut tasks = Vec::with_capacity(num_chunks);
+    for i in 0..num_chunks {
+        let base = SIDECAR_HEADER_SIZE + i * SIDECAR_ENTRY_SIZE;
+        let offset = u64::from_le_bytes(data[base..base + 8].try_into().ok()?);
+        let size = u32::from_le_bytes(data[base + 8..base + 12].try_into().ok()?);
+        tasks.push(ChunkTask {
+            file_index,
+            offset,
+            size,
+        });
+    }
+
+    Some(tasks)
+}
+
+fn write_sidecar_cache(binpack_path: &PathBuf, file_size: u64, tasks: &[ChunkTask]) {
+    let cache_path = sidecar_path(binpack_path);
+    let mut buf = Vec::with_capacity(SIDECAR_HEADER_SIZE + tasks.len() * SIDECAR_ENTRY_SIZE);
+
+    buf.extend_from_slice(SIDECAR_MAGIC);
+    buf.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(&(tasks.len() as u32).to_le_bytes());
+    for task in tasks {
+        buf.extend_from_slice(&task.offset.to_le_bytes());
+        buf.extend_from_slice(&task.size.to_le_bytes());
+    }
+
+    // Atomic write-then-rename so concurrent writers don't produce corrupt reads.
+    let tmp_path = {
+        let mut p = cache_path.as_os_str().to_owned();
+        p.push(&format!(".tmp.{}", std::process::id()));
+        PathBuf::from(p)
+    };
+    if std::fs::write(&tmp_path, &buf).is_ok() {
+        if std::fs::rename(&tmp_path, &cache_path).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+}
+
 fn read_chunk_header_at(
     file: &mut File,
     offset: u64,
@@ -1044,11 +1119,7 @@ fn scan_file_chunk_tasks(
     file_index: usize,
     tasks: &mut Vec<ChunkTask>,
 ) -> Result<(), PipelineError> {
-    let mut file = File::open(path).map_err(|error| {
-        PipelineError::new(format!("failed to open {}: {error}", path.display()))
-    })?;
-    let file_len = file
-        .metadata()
+    let file_len = std::fs::metadata(path)
         .map_err(|error| {
             PipelineError::new(format!(
                 "failed to read metadata for {}: {error}",
@@ -1056,6 +1127,23 @@ fn scan_file_chunk_tasks(
             ))
         })?
         .len();
+
+    if let Some(cached) = load_sidecar_cache(path, file_len, file_index) {
+        eprintln!(
+            "chunk cache hit: {} ({} chunks)",
+            path.display(),
+            cached.len()
+        );
+        tasks.extend(cached);
+        return Ok(());
+    }
+
+    eprintln!("chunk cache miss, scanning: {}", path.display());
+    let start_len = tasks.len();
+
+    let mut file = File::open(path).map_err(|error| {
+        PipelineError::new(format!("failed to open {}: {error}", path.display()))
+    })?;
     let mut header = [0u8; BINPACK_HEADER_SIZE];
     let mut offset = 0u64;
 
@@ -1102,6 +1190,14 @@ fn scan_file_chunk_tasks(
 
         offset = next_offset;
     }
+
+    let new_tasks = &tasks[start_len..];
+    eprintln!(
+        "writing chunk cache: {} ({} chunks)",
+        path.display(),
+        new_tasks.len()
+    );
+    write_sidecar_cache(path, file_len, new_tasks);
 
     Ok(())
 }
