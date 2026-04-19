@@ -14,15 +14,11 @@ dependencies = [
   "python-chess==0.31.4",
   "numpy<2.0",
   "wandb",
-  "ranger22",
   "cupy-cuda13x<14",
   "apache-tvm-ffi==0.1.9",
   "tilelang==0.1.8",
   "ray>=2.55.0",
 ]
-
-[tool.uv.sources]
-ranger22 = { git = "https://github.com/rgodha24/ranger22" }
 
 [tool.maturin]
 python-source = "src/rust/python"

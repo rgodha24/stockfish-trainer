@@ -6,9 +6,9 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
-import ranger22
 import torch
 
+from src import ranger22
 from src.data import Batch, iter_device_batches
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.train.config import BaseTrainingConfig
