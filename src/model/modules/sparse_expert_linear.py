@@ -286,9 +286,11 @@ def _compute_weight_grad_sorted(
     if active_experts.numel() == 0:
         return grad_weight
 
-    max_count = int(counts.max().item())
+    counts_cpu = counts.tolist()
+    active_experts_cpu = active_experts.tolist()
+    max_count = max(counts_cpu)
     if max_count <= _WEIGHT_GRAD_PACK_MAX_COUNT:
-        num_active = int(active_experts.numel())
+        num_active = len(active_experts_cpu)
         starts = torch.cumsum(counts, dim=0) - counts
         row_ids = torch.repeat_interleave(
             torch.arange(num_active, device=expert_long.device), counts
@@ -310,10 +312,10 @@ def _compute_weight_grad_sorted(
         return grad_weight
 
     start = 0
-    for index in range(active_experts.numel()):
-        count = int(counts[index].item())
+    for index in range(len(active_experts_cpu)):
+        count = counts_cpu[index]
         end = start + count
-        expert = int(active_experts[index].item())
+        expert = active_experts_cpu[index]
         grad_weight[expert] = sorted_grad[start:end].T @ sorted_input[start:end]
         start = end
 

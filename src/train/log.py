@@ -236,12 +236,12 @@ class TrainingLogger:
         epoch: int,
         batch_idx: int,
         num_batches: int,
-        loss_value: float,
+        loss: torch.Tensor,
     ) -> None:
         if batch_idx % max(1, num_batches // 4) != 0 and batch_idx != num_batches - 1:
             return
         print(
-            f"epoch={epoch:03d} step={batch_idx + 1}/{num_batches} loss={loss_value:.6f}",
+            f"epoch={epoch:03d} step={batch_idx + 1}/{num_batches} loss={loss.detach().item():.6f}",
             flush=True,
         )
 

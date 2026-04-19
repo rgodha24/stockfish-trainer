@@ -211,7 +211,7 @@ def run_training(
     try:
         for epoch in range(start_epoch, args.max_epochs):
             model.train()
-            epoch_loss_sum = 0.0
+            epoch_loss_sum = torch.zeros((), device=device)
             epoch_start = time.time()
             processed_batches = 0
             logger.start_epoch(source.metrics() if source.metrics is not None else None)
@@ -254,15 +254,14 @@ def run_training(
                 loss.backward()
                 optimizer.step()
 
-                loss_value = float(loss.detach().cpu().item())
-                epoch_loss_sum += loss_value
+                epoch_loss_sum.add_(loss.detach())
                 global_step += 1
                 processed_batches += 1
                 logger.log_step(
                     epoch=epoch,
                     batch_idx=batch_idx,
                     num_batches=num_batches,
-                    loss_value=loss_value,
+                    loss=loss,
                 )
 
             scheduler.step()
@@ -270,7 +269,7 @@ def run_training(
                 raise RuntimeError("training loader produced no batches")
             elapsed = max(time.time() - epoch_start, 1e-9)
             lr = optimizer.param_groups[0]["lr"]
-            epoch_loss = epoch_loss_sum / processed_batches
+            epoch_loss = float(epoch_loss_sum.item()) / processed_batches
             final_epoch = epoch
             logger.finish_epoch(
                 epoch=epoch,
