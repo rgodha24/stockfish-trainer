@@ -75,7 +75,7 @@ class MoELayerStacks(nn.Module):
     def _combine_expert_outputs(
         self, gate: torch.Tensor, stacked_output: torch.Tensor
     ) -> torch.Tensor:
-        return torch.einsum("be,beo->bo", gate, stacked_output)
+        return (gate.unsqueeze(-1) * stacked_output).sum(dim=1)
 
     def forward(
         self, expert_input: torch.Tensor, router_input: torch.Tensor

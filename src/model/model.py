@@ -102,19 +102,14 @@ class NNUEModel(nn.Module):
         b, bpsqt = torch.split(bp, self.L1, dim=1)
 
         if self.stacks == "moe":
-            combined = us * torch.cat([w, b], dim=1) + them * torch.cat([b, w], dim=1)
-            w_half, b_half = combined.split(self.L1, dim=1)
-            w_e, w_r = w_half.split(
-                [self.eval_features_per_perspective, self.router_features_per_perspective],
-                dim=1,
-            )
-            b_e, b_r = b_half.split(
-                [self.eval_features_per_perspective, self.router_features_per_perspective],
-                dim=1,
-            )
-            l0_ = torch.cat([w_e, b_e], dim=1)
-            router_input = torch.cat([w_r, b_r], dim=1)
-            pairwise_chunk_size = self.eval_features_per_perspective // 2
+            # Compute each perspective half directly instead of
+            # cat→mul→add→split→split→cat (saves 2 large cat ops).
+            w_half = us * w + them * b
+            b_half = us * b + them * w
+            ef = self.eval_features_per_perspective
+            l0_ = torch.cat([w_half[:, :ef], b_half[:, :ef]], dim=1)
+            router_input = torch.cat([w_half[:, ef:], b_half[:, ef:]], dim=1)
+            pairwise_chunk_size = ef // 2
         else:
             router_input = None
             l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
@@ -122,11 +117,12 @@ class NNUEModel(nn.Module):
 
         l0_ = torch.clamp(l0_, 0.0, 1.0)
 
-        l0_s = torch.split(l0_, pairwise_chunk_size, dim=1)
-        l0_s1 = [l0_s[0] * l0_s[1], l0_s[2] * l0_s[3]]
+        # Pairwise products: multiply first half by second half of each
+        # perspective. Reshape avoids split→cat overhead.
         # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         # and it's more efficient to divide by 128 instead.
-        l0_ = torch.cat(l0_s1, dim=1) * (127 / 128)
+        l0_ = l0_.reshape(l0_.shape[0], 2, 2, pairwise_chunk_size)
+        l0_ = (l0_[:, :, 0, :] * l0_[:, :, 1, :]).reshape(l0_.shape[0], -1) * (127 / 128)
 
         psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
         wpsqt = wpsqt.gather(1, psqt_indices_unsq)
