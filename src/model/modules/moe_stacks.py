@@ -38,45 +38,6 @@ class MoELayerStacks(nn.Module):
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.router.bias.zero_()
 
-    def _factorized_stacked_forward_all(
-        self, layer: FactorizedStackedLinear, x: torch.Tensor
-    ) -> torch.Tensor:
-        stacked_w = layer.linear.weight.reshape(
-            self.num_experts, layer.out_features, layer.in_features
-        )
-        stacked_b = layer.linear.bias.reshape(self.num_experts, layer.out_features)
-        expert_weight = stacked_w + layer.factorized_linear.weight.unsqueeze(0)
-        expert_bias = stacked_b + layer.factorized_linear.bias.unsqueeze(0)
-        out = F.linear(
-            x,
-            expert_weight.reshape(-1, layer.in_features),
-            expert_bias.reshape(-1),
-        )
-        return out.unflatten(-1, (self.num_experts, layer.out_features))
-
-    def _stacked_forward_all(
-        self, layer: StackedLinear, x: torch.Tensor
-    ) -> torch.Tensor:
-        expert_weight = layer.linear.weight.reshape(
-            self.num_experts, layer.out_features, layer.in_features
-        )
-        expert_bias = layer.linear.bias.reshape(self.num_experts, layer.out_features)
-        if x.dim() == 2:
-            out = F.linear(
-                x,
-                expert_weight.reshape(-1, layer.in_features),
-                expert_bias.reshape(-1),
-            )
-            return out.unflatten(-1, (self.num_experts, layer.out_features))
-        return torch.bmm(
-            x.permute(1, 0, 2), expert_weight.transpose(1, 2)
-        ).permute(1, 0, 2) + expert_bias.unsqueeze(0)
-
-    def _combine_expert_outputs(
-        self, gate: torch.Tensor, stacked_output: torch.Tensor
-    ) -> torch.Tensor:
-        return (gate.unsqueeze(-1) * stacked_output).sum(dim=1)
-
     def forward(
         self, expert_input: torch.Tensor, router_input: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -84,7 +45,6 @@ class MoELayerStacks(nn.Module):
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
         hard_gate = F.one_hot(expert_indices, self.num_experts).to(gate_probs.dtype)
-        gate = hard_gate + gate_probs - gate_probs.detach()
 
         fraction_routed = hard_gate.mean(dim=0)
         avg_gate_prob = gate_probs.mean(dim=0)
@@ -102,31 +62,22 @@ class MoELayerStacks(nn.Module):
                 router_loss + expert_input.new_tensor(self.z_loss_alpha) * z_loss
             )
 
+        l1c_ = self.l1(expert_input, expert_indices)
+        l1x_, l1x_out = l1c_.split(self.L2, dim=1)
+        l1x_ = torch.clamp(
+            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
+            0.0,
+            1.0,
+        )
+        l2c_ = self.l2(l1x_, expert_indices)
+        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
+        l3c_ = self.output(l2x_, expert_indices)
+        l3x_ = l3c_ + l1x_out
         if self.training:
-            l1c_all = self._factorized_stacked_forward_all(self.l1, expert_input)
-            l1x_all, l1x_out_all = torch.split(l1c_all, [self.L2, 1], dim=2)
-            l1x_all = torch.clamp(
-                torch.cat([l1x_all.square() * (255 / 256), l1x_all], dim=2),
-                0.0,
-                1.0,
-            )
-            l2c_all = self._stacked_forward_all(self.l2, l1x_all)
-            l2x_all = torch.clamp(l2c_all, 0.0, 1.0)
-            l3c_all = self._stacked_forward_all(self.output, l2x_all)
-            l3x_all = l3c_all + l1x_out_all
-            l3x_ = self._combine_expert_outputs(gate, l3x_all)
-        else:
-            l1c_ = self.l1(expert_input, expert_indices)
-            l1x_, l1x_out = l1c_.split(self.L2, dim=1)
-            l1x_ = torch.clamp(
-                torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
-                0.0,
-                1.0,
-            )
-            l2c_ = self.l2(l1x_, expert_indices)
-            l2x_ = torch.clamp(l2c_, 0.0, 1.0)
-            l3c_ = self.output(l2x_, expert_indices)
-            l3x_ = l3c_ + l1x_out
+            # Straight-through estimator: forward value stays unscaled,
+            # but router gets gradients through gate_prob.
+            gate_prob = gate_probs.gather(1, expert_indices.unsqueeze(1))
+            l3x_ = l3x_ * (1.0 + gate_prob - gate_prob.detach())
 
         return l3x_, {
             "routing/router_loss": router_loss,
