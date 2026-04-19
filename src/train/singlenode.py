@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import torch
 import tyro
 
 from src.data import make_sparse_batch_dataset
@@ -22,6 +23,9 @@ def make_train_source(args: SingleNodeTrainingConfig) -> TrainBatchSource:
 
 
 def main() -> None:
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     args = tyro.cli(SingleNodeTrainingConfig)
     run_training(args, make_train_source(args))
 

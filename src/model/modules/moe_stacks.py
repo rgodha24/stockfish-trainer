@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .config import LayerStacksConfig
+from .sparse_expert_linear import sparse_expert_linear
 from .stacked_linear import FactorizedStackedLinear, StackedLinear
 
 
@@ -38,15 +39,67 @@ class MoELayerStacks(nn.Module):
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.router.bias.zero_()
 
+    def _expert_params(
+        self, layer: StackedLinear | FactorizedStackedLinear
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        weight = layer.linear.weight.view(
+            layer.count, layer.out_features, layer.in_features
+        )
+        bias = layer.linear.bias.view(layer.count, layer.out_features)
+        factorized = getattr(layer, "factorized_linear", None)
+        if factorized is not None:
+            weight = weight + factorized.weight.unsqueeze(0)
+            bias = bias + factorized.bias.unsqueeze(0)
+        return weight.contiguous(), bias.contiguous()
+
+    def _dense_forward(
+        self,
+        expert_input: torch.Tensor,
+        expert_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        l1c_ = self.l1(expert_input, expert_indices)
+        l1x_, l1x_out = l1c_.split(self.L2, dim=1)
+        l1x_ = torch.clamp(
+            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
+            0.0,
+            1.0,
+        )
+        l2c_ = self.l2(l1x_, expert_indices)
+        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
+        l3c_ = self.output(l2x_, expert_indices)
+        return l3c_ + l1x_out
+
+    def _sparse_forward(
+        self,
+        expert_input: torch.Tensor,
+        expert_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        l1_weight, l1_bias = self._expert_params(self.l1)
+        l1c_ = sparse_expert_linear(expert_input, expert_indices, l1_weight, l1_bias)
+        l1x_, l1x_out = l1c_.split(self.L2, dim=1)
+        l1x_ = torch.clamp(
+            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
+            0.0,
+            1.0,
+        )
+
+        l2_weight, l2_bias = self._expert_params(self.l2)
+        l2c_ = sparse_expert_linear(l1x_, expert_indices, l2_weight, l2_bias)
+        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
+
+        out_weight, out_bias = self._expert_params(self.output)
+        l3c_ = sparse_expert_linear(l2x_, expert_indices, out_weight, out_bias)
+        return l3c_ + l1x_out
+
     def forward(
         self, expert_input: torch.Tensor, router_input: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         gate_logits = self.router(router_input.float())
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
-        hard_gate = F.one_hot(expert_indices, self.num_experts).to(gate_probs.dtype)
-
-        fraction_routed = hard_gate.mean(dim=0)
+        fraction_routed = torch.bincount(expert_indices, minlength=self.num_experts).to(
+            gate_probs.dtype
+        ) / gate_probs.new_tensor(float(expert_indices.numel()))
         avg_gate_prob = gate_probs.mean(dim=0)
         aux_loss = self.num_experts * (fraction_routed * avg_gate_prob).sum()
         z_loss = torch.logsumexp(gate_logits, dim=-1).square().mean()
@@ -62,17 +115,10 @@ class MoELayerStacks(nn.Module):
                 router_loss + expert_input.new_tensor(self.z_loss_alpha) * z_loss
             )
 
-        l1c_ = self.l1(expert_input, expert_indices)
-        l1x_, l1x_out = l1c_.split(self.L2, dim=1)
-        l1x_ = torch.clamp(
-            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
-            0.0,
-            1.0,
-        )
-        l2c_ = self.l2(l1x_, expert_indices)
-        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
-        l3c_ = self.output(l2x_, expert_indices)
-        l3x_ = l3c_ + l1x_out
+        if expert_input.is_cuda and expert_input.dtype == torch.float32:
+            l3x_ = self._sparse_forward(expert_input, expert_indices)
+        else:
+            l3x_ = self._dense_forward(expert_input, expert_indices)
         if self.training:
             # Straight-through estimator: forward value stays unscaled,
             # but router gets gradients through gate_prob.

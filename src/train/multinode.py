@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import torch
 import tyro
 
 from src.distributed import RayBatchStream
@@ -17,6 +18,9 @@ def make_train_source(args: MultiNodeTrainingConfig) -> TrainBatchSource:
 
 
 def main() -> None:
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     args = tyro.cli(MultiNodeTrainingConfig)
     run_training(args, make_train_source(args))
 

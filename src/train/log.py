@@ -78,11 +78,11 @@ def _print_loader_summary(
 
 @dataclass(slots=True)
 class RoutingMetricsAccumulator:
-    router_loss_sum: float
-    aux_loss_sum: float
-    z_loss_sum: float
-    entropy_sum: float
-    top1_prob_sum: float
+    router_loss_sum: torch.Tensor
+    aux_loss_sum: torch.Tensor
+    z_loss_sum: torch.Tensor
+    entropy_sum: torch.Tensor
+    top1_prob_sum: torch.Tensor
     fraction_routed_sum: torch.Tensor
     avg_gate_prob_sum: torch.Tensor
 
@@ -94,17 +94,18 @@ class RoutingMetricsAccumulator:
         avg_gate_prob = log_dict.get("routing/avg_gate_prob")
         if fraction_routed is None or avg_gate_prob is None:
             return None
+        device = fraction_routed.device
         return cls(
-            router_loss_sum=0.0,
-            aux_loss_sum=0.0,
-            z_loss_sum=0.0,
-            entropy_sum=0.0,
-            top1_prob_sum=0.0,
+            router_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
+            aux_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
+            z_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
+            entropy_sum=torch.zeros((), device=device, dtype=torch.float32),
+            top1_prob_sum=torch.zeros((), device=device, dtype=torch.float32),
             fraction_routed_sum=torch.zeros_like(
-                fraction_routed.detach().cpu(), dtype=torch.float64
+                fraction_routed.detach(), dtype=torch.float32
             ),
             avg_gate_prob_sum=torch.zeros_like(
-                avg_gate_prob.detach().cpu(), dtype=torch.float64
+                avg_gate_prob.detach(), dtype=torch.float32
             ),
         )
 
@@ -127,18 +128,18 @@ class RoutingMetricsAccumulator:
         ):
             return
 
-        self.router_loss_sum += float(router_loss.detach().cpu().item())
-        self.aux_loss_sum += float(aux_loss.detach().cpu().item())
-        self.z_loss_sum += float(z_loss.detach().cpu().item())
-        self.entropy_sum += float(entropy.detach().cpu().item())
-        self.top1_prob_sum += float(top1_prob.detach().cpu().item())
-        self.fraction_routed_sum += fraction_routed.detach().cpu().to(torch.float64)
-        self.avg_gate_prob_sum += avg_gate_prob.detach().cpu().to(torch.float64)
+        self.router_loss_sum.add_(router_loss.detach().to(dtype=torch.float32))
+        self.aux_loss_sum.add_(aux_loss.detach().to(dtype=torch.float32))
+        self.z_loss_sum.add_(z_loss.detach().to(dtype=torch.float32))
+        self.entropy_sum.add_(entropy.detach().to(dtype=torch.float32))
+        self.top1_prob_sum.add_(top1_prob.detach().to(dtype=torch.float32))
+        self.fraction_routed_sum.add_(fraction_routed.detach().to(dtype=torch.float32))
+        self.avg_gate_prob_sum.add_(avg_gate_prob.detach().to(dtype=torch.float32))
 
     def finalize(self, processed_batches: int) -> tuple[dict[str, Any], str]:
         denom = max(processed_batches, 1)
-        avg_fraction_routed = self.fraction_routed_sum / denom
-        avg_gate_prob = self.avg_gate_prob_sum / denom
+        avg_fraction_routed = (self.fraction_routed_sum / denom).detach().cpu()
+        avg_gate_prob = (self.avg_gate_prob_sum / denom).detach().cpu()
         experts_used = int((avg_fraction_routed > 1e-4).sum().item())
         dead_experts = int((avg_fraction_routed <= 1e-4).sum().item())
         uniform = 1.0 / max(avg_fraction_routed.numel(), 1)
@@ -146,11 +147,21 @@ class RoutingMetricsAccumulator:
         load_cv = load_std / uniform if uniform > 0.0 else 0.0
 
         metrics: dict[str, Any] = {
-            "routing/router_loss_epoch": self.router_loss_sum / denom,
-            "routing/aux_loss_epoch": self.aux_loss_sum / denom,
-            "routing/z_loss_epoch": self.z_loss_sum / denom,
-            "routing/entropy_epoch": self.entropy_sum / denom,
-            "routing/top1_prob_epoch": self.top1_prob_sum / denom,
+            "routing/router_loss_epoch": float(
+                (self.router_loss_sum / denom).detach().cpu().item()
+            ),
+            "routing/aux_loss_epoch": float(
+                (self.aux_loss_sum / denom).detach().cpu().item()
+            ),
+            "routing/z_loss_epoch": float(
+                (self.z_loss_sum / denom).detach().cpu().item()
+            ),
+            "routing/entropy_epoch": float(
+                (self.entropy_sum / denom).detach().cpu().item()
+            ),
+            "routing/top1_prob_epoch": float(
+                (self.top1_prob_sum / denom).detach().cpu().item()
+            ),
             "routing/load_max_epoch": float(avg_fraction_routed.max().item()),
             "routing/load_min_epoch": float(avg_fraction_routed.min().item()),
             "routing/load_std_epoch": load_std,
