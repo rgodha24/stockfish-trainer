@@ -67,6 +67,7 @@ done
   --pc-y1 0.6893201149773951 \
   --pc-y2 2.9285769485515805 \
   --pc-y3 1.4386005301749225 \
+  --stacks moe \
   --w1 3.3553547771220007 \
   --w2 0.7006821612968052 \
   --default-root-dir "$HOME/scratch/stockfish-training" \
