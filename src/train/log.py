@@ -85,6 +85,7 @@ class RoutingMetricsAccumulator:
     top1_prob_sum: torch.Tensor
     fraction_routed_sum: torch.Tensor
     avg_gate_prob_sum: torch.Tensor
+    last_tau: float
 
     @classmethod
     def maybe_create(
@@ -107,6 +108,7 @@ class RoutingMetricsAccumulator:
             avg_gate_prob_sum=torch.zeros_like(
                 avg_gate_prob.detach(), dtype=torch.float32
             ),
+            last_tau=0.0,
         )
 
     def update(self, log_dict: dict[str, torch.Tensor]) -> None:
@@ -135,6 +137,9 @@ class RoutingMetricsAccumulator:
         self.top1_prob_sum.add_(top1_prob.detach().to(dtype=torch.float32))
         self.fraction_routed_sum.add_(fraction_routed.detach().to(dtype=torch.float32))
         self.avg_gate_prob_sum.add_(avg_gate_prob.detach().to(dtype=torch.float32))
+        tau = log_dict.get("routing/tau")
+        if tau is not None:
+            self.last_tau = float(tau.detach().cpu().item())
 
     def finalize(self, processed_batches: int) -> tuple[dict[str, Any], str]:
         denom = max(processed_batches, 1)
@@ -186,10 +191,13 @@ class RoutingMetricsAccumulator:
             title="Routing load by expert",
         )
 
+        metrics["routing/tau"] = self.last_tau
+
         summary = (
-            "routing aux={aux:.6f} z={z:.6f} entropy={entropy:.3f} top1={top1:.3f} "
+            "routing tau={tau:.3f} aux={aux:.6f} z={z:.6f} entropy={entropy:.3f} top1={top1:.3f} "
             "load[min,max]=[{load_min:.4f},{load_max:.4f}] used={used}/{total}"
         ).format(
+            tau=self.last_tau,
             aux=metrics["routing/aux_loss_epoch"],
             z=metrics["routing/z_loss_epoch"],
             entropy=metrics["routing/entropy_epoch"],

@@ -120,12 +120,25 @@ def build_training_state(
         router_features=args.router_features,
         aux_loss_alpha=args.aux_loss_alpha,
         z_loss_alpha=args.z_loss_alpha,
-        gumbel_tau=args.gumbel_tau,
+        gumbel_tau_start=args.gumbel_tau_start,
+        gumbel_tau_end=args.gumbel_tau_end,
+        gumbel_anneal_fraction=args.gumbel_anneal_fraction,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
+    # Separate param groups: router gets lower LR
+    router_params = set()
+    if args.stacks == "moe":
+        router_params = set(model.layer_stacks.router.parameters())
+    main_params = [p for p in model.parameters() if p not in router_params]
+    param_groups = [{"params": main_params}]
+    if router_params:
+        param_groups.append(
+            {"params": list(router_params), "lr": args.lr * args.router_lr_multiplier}
+        )
+
     optimizer = ranger22.Ranger22(
-        model.parameters(),
+        param_groups,
         lr=args.lr,
         betas=(0.9, 0.999),
         eps=1.0e-7,
@@ -212,6 +225,10 @@ def run_training(
     try:
         for epoch in range(start_epoch, args.max_epochs):
             model.train()
+            # Update tau annealing progress for MoE
+            if args.stacks == "moe":
+                progress = epoch / args.max_epochs
+                model.layer_stacks.set_training_progress(progress)
             epoch_loss_sum = torch.zeros((), device=device)
             epoch_start = time.time()
             processed_batches = 0

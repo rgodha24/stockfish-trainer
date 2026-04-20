@@ -293,9 +293,11 @@ def _model_from_checkpoint(path: str) -> NNUEModel:
         stacks=cfg_dict.get("stacks") or "layer",
         num_experts=cfg_dict.get("num_experts", 8),
         router_features=cfg_dict.get("router_features", 32),
-        aux_loss_alpha=cfg_dict.get("aux_loss_alpha", 1e-3),
-        z_loss_alpha=cfg_dict.get("z_loss_alpha", 0.0),
-        gumbel_tau=cfg_dict.get("gumbel_tau", 0.2),
+        aux_loss_alpha=cfg_dict.get("aux_loss_alpha", 0.0),
+        z_loss_alpha=cfg_dict.get("z_loss_alpha", 1e-3),
+        gumbel_tau_start=cfg_dict.get("gumbel_tau_start", 2.0),
+        gumbel_tau_end=cfg_dict.get("gumbel_tau_end", 0.3),
+        gumbel_anneal_fraction=cfg_dict.get("gumbel_anneal_fraction", 0.15),
     )
     features = cfg_dict.get("features", "Full_Threats+HalfKAv2_hm^")
 

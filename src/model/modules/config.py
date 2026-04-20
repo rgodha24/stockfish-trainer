@@ -21,12 +21,16 @@ class LayerStacksConfig:
     """number of experts used when stacks='moe'"""
     router_features: int = 32
     """total router-only accumulator features across both perspectives (16 per side by default)"""
-    aux_loss_alpha: float = 1e-3
+    aux_loss_alpha: float = 0.0
     """Switch-style load-balancing coefficient for MoE routing"""
-    z_loss_alpha: float = 0.0
+    z_loss_alpha: float = 1e-3
     """router z-loss coefficient for MoE routing"""
-    gumbel_tau: float = 0.2
-    """Gumbel-Softmax temperature for MoE routing (lower = sharper)"""
+    gumbel_tau_start: float = 2.0
+    """Gumbel-Softmax starting temperature (high = soft/exploratory)"""
+    gumbel_tau_end: float = 0.3
+    """Gumbel-Softmax ending temperature (low = sharp/committed)"""
+    gumbel_anneal_fraction: float = 0.15
+    """Fraction of total training over which to anneal tau"""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:

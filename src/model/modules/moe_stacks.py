@@ -21,7 +21,10 @@ class MoELayerStacks(nn.Module):
         self.expert_input_dim = config.eval_features_per_perspective
         self.aux_loss_alpha = config.aux_loss_alpha
         self.z_loss_alpha = config.z_loss_alpha
-        self.gumbel_tau = config.gumbel_tau
+        self.gumbel_tau_start = config.gumbel_tau_start
+        self.gumbel_tau_end = config.gumbel_tau_end
+        self.gumbel_anneal_fraction = config.gumbel_anneal_fraction
+        self._training_progress: float = 0.0
 
         self.router = nn.Linear(self.router_input_dim, num_experts)
         self._reset_router()
@@ -34,6 +37,18 @@ class MoELayerStacks(nn.Module):
 
         with torch.no_grad():
             self.output.linear.bias.zero_()
+
+    def set_training_progress(self, progress: float) -> None:
+        """Set training progress (0.0 to 1.0) for tau annealing."""
+        self._training_progress = progress
+
+    @property
+    def current_tau(self) -> float:
+        """Compute current Gumbel-Softmax temperature from training progress."""
+        if self._training_progress >= self.gumbel_anneal_fraction:
+            return self.gumbel_tau_end
+        t = self._training_progress / self.gumbel_anneal_fraction
+        return self.gumbel_tau_start + (self.gumbel_tau_end - self.gumbel_tau_start) * t
 
     @torch.no_grad()
     def _reset_router(self) -> None:
@@ -124,8 +139,9 @@ class MoELayerStacks(nn.Module):
         if self.training:
             # All-experts forward + Gumbel-Softmax soft mixing for gradient flow
             all_outputs = self._all_experts_forward(expert_input)  # (B, E, 1)
+            tau = self.current_tau
             routing_weights = F.gumbel_softmax(
-                gate_logits, tau=self.gumbel_tau, hard=True
+                gate_logits, tau=tau, hard=True
             )
             l3x_ = (all_outputs * routing_weights.unsqueeze(-1)).sum(dim=1)  # (B, 1)
         else:
@@ -146,6 +162,7 @@ class MoELayerStacks(nn.Module):
             "routing/avg_gate_prob": avg_gate_prob,
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
+            "routing/tau": expert_input.new_tensor(tau if self.training else 0.0),
         }
 
     @torch.no_grad()

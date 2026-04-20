@@ -23,9 +23,12 @@ class BaseTrainingConfig:
     stacks: Stacks = "layer"
     num_experts: int = 8
     router_features: int = 32
-    aux_loss_alpha: float = 1e-3
-    z_loss_alpha: float = 0.0
-    gumbel_tau: float = 0.2
+    aux_loss_alpha: float = 0.0
+    z_loss_alpha: float = 1e-3
+    gumbel_tau_start: float = 2.0
+    gumbel_tau_end: float = 0.3
+    gumbel_anneal_fraction: float = 0.15
+    router_lr_multiplier: float = 0.1
 
     lr: float = 8.75e-4
     gamma: float = 0.992
