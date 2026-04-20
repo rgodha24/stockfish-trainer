@@ -26,7 +26,8 @@ class MoELayerStacks(nn.Module):
         self.gumbel_anneal_fraction = config.gumbel_anneal_fraction
         self._training_progress: float = 0.0
 
-        self.router = nn.Linear(self.router_input_dim, num_experts)
+        # Router input: accumulator features + one-hot piece-count bucket
+        self.router = nn.Linear(self.router_input_dim + num_experts, num_experts)
         self._reset_router()
 
         self.l1 = StackedLinear(
@@ -54,6 +55,11 @@ class MoELayerStacks(nn.Module):
     def _reset_router(self) -> None:
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.router.bias.zero_()
+        # Warm-start: piece-count bucket columns get identity-like init
+        # so expert i strongly prefers bucket i from step 0
+        bucket_cols = self.router.weight[:, self.router_input_dim :]
+        bucket_cols.zero_()
+        bucket_cols.add_(torch.eye(self.num_experts) * 5.0)
 
     def _expert_params(
         self, layer: StackedLinear
@@ -113,9 +119,16 @@ class MoELayerStacks(nn.Module):
         return l3c_ + l1x_out
 
     def forward(
-        self, expert_input: torch.Tensor, router_input: torch.Tensor
+        self,
+        expert_input: torch.Tensor,
+        router_input: torch.Tensor,
+        layer_stack_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        gate_logits = self.router(router_input.float())
+        bucket_onehot = F.one_hot(
+            layer_stack_indices, num_classes=self.num_experts
+        ).float()
+        router_full = torch.cat([router_input.float(), bucket_onehot], dim=-1)
+        gate_logits = self.router(router_full)
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
         fraction_routed = torch.bincount(expert_indices, minlength=self.num_experts).to(
