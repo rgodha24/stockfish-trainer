@@ -43,13 +43,16 @@ class QuantizationManager:
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
+        l1_config: WeightClippingConfig = {
+            "params": [model.layer_stacks.l1.linear.weight],
+            "min_weight": -self.max_hidden_weight,
+            "max_weight": self.max_hidden_weight,
+        }
+        factorized = getattr(model.layer_stacks.l1, "factorized_linear", None)
+        if factorized is not None:
+            l1_config["virtual_params"] = factorized.weight
         return [
-            {
-                "params": [model.layer_stacks.l1.linear.weight],
-                "min_weight": -self.max_hidden_weight,
-                "max_weight": self.max_hidden_weight,
-                "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
-            },
+            l1_config,
             {
                 "params": [model.layer_stacks.l2.linear.weight],
                 "min_weight": -self.max_hidden_weight,

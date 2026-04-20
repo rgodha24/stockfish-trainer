@@ -1,8 +1,8 @@
 """Export a trained model checkpoint to .nnue format for Stockfish.
 
-Supports both standard LayerStacks models and MoE (Mixture of Experts) models.
-MoE models are written with VERSION_MOE and include a router section before the
-per-expert FC layers.
+Supports standard LayerStacks models, shared/no-stack models, and MoE
+(Mixture of Experts) models. MoE models are written with VERSION_MOE and
+include a router section before the per-expert FC layers.
 
 Usage:
     python -m src.scripts.serialize <source.pt> <target.nnue> [options]
@@ -90,8 +90,8 @@ def _encode_leb_128_array(arr: npt.NDArray) -> bytes:
 def _fc_hash(model: NNUEModel) -> int:
     """Compute the Stockfish FC-layers hash for the model.
 
-    For standard LayerStacks models the InputSlice dimension is ``L1 * 2``
-    (both perspectives before the pairwise product).  For MoE models it is
+    For non-MoE models the InputSlice dimension is ``L1 * 2`` (both
+    perspectives before the pairwise product). For MoE models it is
     ``eval_features_per_perspective * 2`` because only the eval slice of the
     accumulator is fed into the experts.
     """
@@ -295,6 +295,7 @@ def _model_from_checkpoint(path: str) -> NNUEModel:
         router_features=cfg_dict.get("router_features", 32),
         aux_loss_alpha=cfg_dict.get("aux_loss_alpha", 1e-3),
         z_loss_alpha=cfg_dict.get("z_loss_alpha", 0.0),
+        gumbel_tau=cfg_dict.get("gumbel_tau", 0.2),
     )
     features = cfg_dict.get("features", "Full_Threats+HalfKAv2_hm^")
 
@@ -316,6 +317,22 @@ def _load_model(path: str) -> NNUEModel:
         f"Unrecognised .pt format in {path!r}. "
         "Expected a training checkpoint dict or a saved NNUEModel."
     )
+
+
+def _describe_model_for_export(model: NNUEModel) -> str:
+    if isinstance(model.layer_stacks, MoELayerStacks):
+        stacks = model.layer_stacks
+        return (
+            f"  MoE model: {stacks.num_experts} experts, "
+            f"router_input_dim={stacks.router_input_dim}, "
+            f"eval_features_per_perspective={model.eval_features_per_perspective}"
+        )
+
+    count = model.layer_stacks.count
+    if getattr(model, "stacks", "layer") == "none":
+        return f"  Shared/no-stack model: {count} identical buckets, L1={model.L1}"
+
+    return f"  LayerStacks model: {count} buckets, L1={model.L1}"
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -355,17 +372,7 @@ def main() -> None:
     print(f"Converting {args.source!r} → {args.target!r}")
 
     model = _load_model(args.source)
-    is_moe = isinstance(model.layer_stacks, MoELayerStacks)
-    if is_moe:
-        stacks = model.layer_stacks
-        print(
-            f"  MoE model: {stacks.num_experts} experts, "
-            f"router_input_dim={stacks.router_input_dim}, "
-            f"eval_features_per_perspective={model.eval_features_per_perspective}"
-        )
-    else:
-        count = model.layer_stacks.count
-        print(f"  LayerStacks model: {count} buckets, L1={model.L1}")
+    print(_describe_model_for_export(model))
 
     target_is_nnue = cfg.out_sha or args.target.endswith(".nnue")
 

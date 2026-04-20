@@ -120,6 +120,7 @@ def build_training_state(
         router_features=args.router_features,
         aux_loss_alpha=args.aux_loss_alpha,
         z_loss_alpha=args.z_loss_alpha,
+        gumbel_tau=args.gumbel_tau,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 

@@ -25,6 +25,8 @@ class LayerStacksConfig:
     """Switch-style load-balancing coefficient for MoE routing"""
     z_loss_alpha: float = 0.0
     """router z-loss coefficient for MoE routing"""
+    gumbel_tau: float = 0.2
+    """Gumbel-Softmax temperature for MoE routing (lower = sharper)"""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:

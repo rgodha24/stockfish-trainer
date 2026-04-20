@@ -25,6 +25,7 @@ class BaseTrainingConfig:
     router_features: int = 32
     aux_loss_alpha: float = 1e-3
     z_loss_alpha: float = 0.0
+    gumbel_tau: float = 0.2
 
     lr: float = 8.75e-4
     gamma: float = 0.992

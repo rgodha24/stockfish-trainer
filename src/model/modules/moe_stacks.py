@@ -7,7 +7,7 @@ from torch import nn
 
 from .config import LayerStacksConfig
 from .sparse_expert_linear import sparse_expert_linear
-from .stacked_linear import FactorizedStackedLinear, StackedLinear
+from .stacked_linear import StackedLinear
 
 
 class MoELayerStacks(nn.Module):
@@ -21,11 +21,12 @@ class MoELayerStacks(nn.Module):
         self.expert_input_dim = config.eval_features_per_perspective
         self.aux_loss_alpha = config.aux_loss_alpha
         self.z_loss_alpha = config.z_loss_alpha
+        self.gumbel_tau = config.gumbel_tau
 
         self.router = nn.Linear(self.router_input_dim, num_experts)
         self._reset_router()
 
-        self.l1 = FactorizedStackedLinear(
+        self.l1 = StackedLinear(
             self.expert_input_dim, self.L2 + 1, num_experts
         )
         self.l2 = StackedLinear(self.L2 * 2, self.L3, num_experts)
@@ -40,33 +41,38 @@ class MoELayerStacks(nn.Module):
         self.router.bias.zero_()
 
     def _expert_params(
-        self, layer: StackedLinear | FactorizedStackedLinear
+        self, layer: StackedLinear
     ) -> tuple[torch.Tensor, torch.Tensor]:
         weight = layer.linear.weight.view(
             layer.count, layer.out_features, layer.in_features
         )
         bias = layer.linear.bias.view(layer.count, layer.out_features)
-        factorized = getattr(layer, "factorized_linear", None)
-        if factorized is not None:
-            weight = weight + factorized.weight.unsqueeze(0)
-            bias = bias + factorized.bias.unsqueeze(0)
         return weight.contiguous(), bias.contiguous()
 
-    def _dense_forward(
+    def _all_experts_forward(
         self,
         expert_input: torch.Tensor,
-        expert_indices: torch.Tensor,
     ) -> torch.Tensor:
-        l1c_ = self.l1(expert_input, expert_indices)
-        l1x_, l1x_out = l1c_.split(self.L2, dim=1)
+        """Compute all experts in parallel. Returns (B, num_experts, 1)."""
+        # l1: (B, in) -> (B, num_experts, L2+1)
+        l1_w, l1_b = self._expert_params(self.l1)
+        l1c_ = torch.einsum("bi,eoi->beo", expert_input, l1_w) + l1_b
+
+        l1x_, l1x_out = l1c_.split(self.L2, dim=2)
         l1x_ = torch.clamp(
-            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
+            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=2),
             0.0,
             1.0,
         )
-        l2c_ = self.l2(l1x_, expert_indices)
+
+        # l2: (B, num_experts, L2*2) -> (B, num_experts, L3)
+        l2_w, l2_b = self._expert_params(self.l2)
+        l2c_ = torch.einsum("bei,eoi->beo", l1x_, l2_w) + l2_b
         l2x_ = torch.clamp(l2c_, 0.0, 1.0)
-        l3c_ = self.output(l2x_, expert_indices)
+
+        # output: (B, num_experts, L3) -> (B, num_experts, 1)
+        out_w, out_b = self._expert_params(self.output)
+        l3c_ = torch.einsum("bei,eoi->beo", l2x_, out_w) + out_b
         return l3c_ + l1x_out
 
     def _sparse_forward(
@@ -115,15 +121,22 @@ class MoELayerStacks(nn.Module):
                 router_loss + expert_input.new_tensor(self.z_loss_alpha) * z_loss
             )
 
-        if expert_input.is_cuda and expert_input.dtype == torch.float32:
-            l3x_ = self._sparse_forward(expert_input, expert_indices)
-        else:
-            l3x_ = self._dense_forward(expert_input, expert_indices)
         if self.training:
-            # Straight-through estimator: forward value stays unscaled,
-            # but router gets gradients through gate_prob.
-            gate_prob = gate_probs.gather(1, expert_indices.unsqueeze(1))
-            l3x_ = l3x_ * (1.0 + gate_prob - gate_prob.detach())
+            # All-experts forward + Gumbel-Softmax soft mixing for gradient flow
+            all_outputs = self._all_experts_forward(expert_input)  # (B, E, 1)
+            routing_weights = F.gumbel_softmax(
+                gate_logits, tau=self.gumbel_tau, hard=True
+            )
+            l3x_ = (all_outputs * routing_weights.unsqueeze(-1)).sum(dim=1)  # (B, 1)
+        else:
+            # Inference: hard argmax, single expert (sparse kernel on CUDA)
+            if expert_input.is_cuda and expert_input.dtype == torch.float32:
+                l3x_ = self._sparse_forward(expert_input, expert_indices)
+            else:
+                all_outputs = self._all_experts_forward(expert_input)
+                l3x_ = all_outputs.gather(
+                    1, expert_indices.view(-1, 1, 1).expand(-1, 1, all_outputs.shape[2])
+                ).squeeze(1)
 
         return l3x_, {
             "routing/router_loss": router_loss,
@@ -144,4 +157,4 @@ class MoELayerStacks(nn.Module):
 
     @torch.no_grad()
     def coalesce_layer_stacks_inplace(self) -> None:
-        self.l1.coalesce_weights()
+        pass  # No factorized weights to coalesce
