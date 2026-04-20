@@ -15,9 +15,11 @@ import struct
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+import numpy as np
 import numpy.typing as npt
 import torch
 import tyro
+from numba import njit
 from torch import nn
 from tyro.conf import OmitArgPrefixes, Positional
 
@@ -43,6 +45,46 @@ DEFAULT_DESCRIPTION = (
     "Network trained with the stockfish-trainer "
     "(https://github.com/rgodha24/stockfish-trainer)."
 )
+
+LEB128_MAGIC = b"COMPRESSED_LEB128"
+
+
+def _encode_leb_128_array_python(arr: npt.NDArray) -> bytes:
+    out = bytearray()
+    for raw in arr.reshape(-1):
+        value = int(raw)
+        while True:
+            byte = value & 0x7F
+            value >>= 7
+            if (value == 0 and (byte & 0x40) == 0) or (
+                value == -1 and (byte & 0x40) != 0
+            ):
+                out.append(byte)
+                break
+            out.append(byte | 0x80)
+    return bytes(out)
+
+
+@njit
+def _encode_leb_128_array_numba(arr: npt.NDArray) -> list[int]:
+    out = []
+    for raw in arr:
+        value = int(raw)
+        while True:
+            byte = value & 0x7F
+            value >>= 7
+            if (value == 0 and (byte & 0x40) == 0) or (
+                value == -1 and (byte & 0x40) != 0
+            ):
+                out.append(byte)
+                break
+            out.append(byte | 0x80)
+    return out
+
+
+def _encode_leb_128_array(arr: npt.NDArray) -> bytes:
+    flat = np.ascontiguousarray(arr.reshape(-1))
+    return bytes(_encode_leb_128_array_numba(flat))
 
 
 def _fc_hash(model: NNUEModel) -> int:
@@ -77,7 +119,7 @@ def _fc_hash(model: NNUEModel) -> int:
             layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
         prev_hash = layer_hash
 
-    return layer_hash
+    return prev_hash
 
 
 class NNUEWriter:
@@ -109,7 +151,7 @@ class NNUEWriter:
         self,
         model: NNUEModel,
         description: str | None = None,
-        ft_compression: Literal["none"] = "none",
+        ft_compression: Literal["none", "leb128"] = "leb128",
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
@@ -129,7 +171,7 @@ class NNUEWriter:
 
         # --- Feature transformer ---
         self.int32(model.feature_hash ^ (model.L1 * 2))
-        self._write_feature_transformer(model)
+        self._write_feature_transformer(model, ft_compression)
 
         # --- Router (MoE only) ---
         if is_moe:
@@ -144,7 +186,9 @@ class NNUEWriter:
 
     # -- FT ---------------------------------------------------------------
 
-    def _write_feature_transformer(self, model: NNUEModel) -> None:
+    def _write_feature_transformer(
+        self, model: NNUEModel, ft_compression: Literal["none", "leb128"]
+    ) -> None:
         layer = model.input
 
         bias = layer.bias.data[: model.L1]
@@ -156,17 +200,17 @@ class NNUEWriter:
             bias, weight, psqt_weight
         )
 
-        self._write_tensor(bias.flatten().numpy())
+        self._write_tensor(bias.flatten().numpy(), ft_compression)
         offset = 0
         for f in layer.features:
-            n = int(f.NUM_REAL_FEATURES)
+            n = int(getattr(f, "NUM_REAL_FEATURES"))
             segment = weight[offset : offset + n]
             if f.EXPORT_WEIGHT_DTYPE == torch.int8:
                 self._write_tensor(segment.to(torch.int8).flatten().numpy())
             else:
-                self._write_tensor(segment.flatten().numpy())
+                self._write_tensor(segment.flatten().numpy(), ft_compression)
             offset += n
-        self._write_tensor(psqt_weight.flatten().numpy())
+        self._write_tensor(psqt_weight.flatten().numpy(), ft_compression)
 
     # -- Router -----------------------------------------------------------
 
@@ -214,8 +258,21 @@ class NNUEWriter:
 
     # -- Primitives -------------------------------------------------------
 
-    def _write_tensor(self, arr: npt.NDArray) -> None:
-        self.buf.extend(arr.tobytes())
+    def _write_leb_128_array(self, arr: npt.NDArray) -> None:
+        payload = _encode_leb_128_array(arr)
+        self.int32(len(payload))
+        self.buf.extend(payload)
+
+    def _write_tensor(
+        self, arr: npt.NDArray, compression: Literal["none", "leb128"] = "none"
+    ) -> None:
+        if compression == "none":
+            self.buf.extend(arr.tobytes())
+        elif compression == "leb128":
+            self.buf.extend(LEB128_MAGIC)
+            self._write_leb_128_array(arr)
+        else:
+            raise ValueError(f"Invalid compression mode: {compression}")
 
     def int32(self, v: int) -> None:
         self.buf.extend(struct.pack("<I", v & 0xFFFFFFFF))
@@ -274,6 +331,9 @@ class SerializeConfig:
     description: Optional[str] = None
     """Description string embedded in the .nnue header."""
 
+    ft_compression: Literal["none", "leb128"] = "leb128"
+    """Compression method for FT arrays in .nnue output."""
+
 
 @dataclass(frozen=True)
 class CliConfig:
@@ -318,7 +378,11 @@ def main() -> None:
         return
 
     if target_is_nnue:
-        writer = NNUEWriter(model, description=cfg.description)
+        writer = NNUEWriter(
+            model,
+            description=cfg.description,
+            ft_compression=cfg.ft_compression,
+        )
         buf = bytes(writer.buf)
 
         if cfg.out_sha:
