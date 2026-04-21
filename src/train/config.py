@@ -57,7 +57,7 @@ class BaseTrainingConfig:
 
     epoch_size: int = 100_000_000
     loader_threads: int = -1
-    shuffle_buffer_entries: int = 16384
+    shuffle_buffer_entries: int = 65536
     pin_memory: bool = True
     data_loader_queue_size: int = 16
 

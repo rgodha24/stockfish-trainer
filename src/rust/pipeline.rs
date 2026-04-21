@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use sfbinpack::chess::{color::Color, piece::Piece, piecetype::PieceType};
 use sfbinpack::{CompressedReaderError, CompressedTrainingDataEntryReader, TrainingDataEntry};
@@ -181,7 +182,7 @@ impl PipelineConfig {
             total_threads,
             thread_override: None,
             slab_count: default_batch_slab_count(total_threads),
-            shuffle_buffer_entries: 16_384,
+            shuffle_buffer_entries: 65_536,
             accumulation_entries: DEFAULT_ACCUMULATION_ENTRIES,
             cyclic: false,
             skip_config: SkipConfig::default(),
@@ -272,7 +273,12 @@ impl BatchPipeline {
     pub fn new(config: PipelineConfig) -> Result<Self, PipelineError> {
         config.validate()?;
 
-        let scanned_chunks = scan_chunk_tasks(&config.files, config.rank, config.world_size)?;
+        let mut scanned_chunks = scan_chunk_tasks(&config.files, config.rank, config.world_size)?;
+        if !scanned_chunks.is_empty() {
+            let shuffle_seed = config.seed.unwrap_or_else(random_seed);
+            let mut rng = SmallRng::seed_from_u64(shuffle_seed);
+            scanned_chunks.shuffle(&mut rng);
+        }
         let scanned_chunk_count = scanned_chunks.len() as u64;
         let (decode_threads, encode_threads) = config.thread_counts(scanned_chunks.len());
 

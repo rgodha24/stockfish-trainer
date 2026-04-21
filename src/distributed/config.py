@@ -18,7 +18,7 @@ class DistributedLoaderConfig:
     loader_threads: int = 16
     decode_threads: int = -1
     encode_threads: int = 4
-    shuffle_buffer_entries: int = 16384
+    shuffle_buffer_entries: int = 65536
 
     filtered: bool = True
     wld_filtered: bool = True

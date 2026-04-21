@@ -24,7 +24,7 @@ class BenchLoaderConfig:
     batch_size: int = 65536
     features: str = "Full_Threats+HalfKAv2_hm^"
     loader_threads: int = -1
-    shuffle_buffer_entries: int = 16384
+    shuffle_buffer_entries: int = 65536
     filtered: bool = True
     wld_filtered: bool = True
     random_fen_skipping: int = 0
