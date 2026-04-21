@@ -38,8 +38,6 @@ class MoELayerStacks(nn.Module):
         with torch.no_grad():
             self.output.linear.bias.zero_()
 
-        self._diversify_expert_inits()
-
     def set_training_progress(self, progress: float) -> None:
         """Set training progress (0.0 to 1.0) for tau annealing."""
         self._training_progress = progress
