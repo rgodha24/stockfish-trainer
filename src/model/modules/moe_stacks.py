@@ -160,22 +160,20 @@ class MoELayerStacks(nn.Module):
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
 
-        tau = self.current_tau
-        if self.training:
-            # All-experts forward + Gumbel-Softmax soft mixing for gradient flow
-            all_outputs = self._all_experts_forward(x)  # (B, E, 1)
-            routing_weights = F.gumbel_softmax(gate_logits, tau=tau, hard=True)
-            l3x_ = (all_outputs * routing_weights.unsqueeze(-1)).sum(dim=1)  # (B, 1)
+        all_outputs = self._all_experts_forward(x)  # (B, E, 1)
+        expert_output_std = all_outputs.std(dim=1).mean()
+        # Hard argmax routing (matches inference; sparse kernel on CUDA)
+        if x.is_cuda and x.dtype == torch.float32 and not self.training:
+            l3x_ = self._sparse_forward(x, expert_indices)
         else:
-            # Inference: hard argmax, single expert (sparse kernel on CUDA)
-            if x.is_cuda and x.dtype == torch.float32:
-                l3x_ = self._sparse_forward(x, expert_indices)
-            else:
-                all_outputs = self._all_experts_forward(x)
-                l3x_ = all_outputs.gather(
-                    1, expert_indices.view(-1, 1, 1).expand(-1, 1, all_outputs.shape[2])
-                ).squeeze(1)
-
+            l3x_ = all_outputs.gather(
+                1, expert_indices.view(-1, 1, 1).expand(-1, 1, all_outputs.shape[2])
+            ).squeeze(1)
+        if self.training:
+            # Straight-through estimator: forward value stays unscaled,
+            # but router gets gradients through gate_prob.
+            gate_prob = gate_probs.gather(1, expert_indices.unsqueeze(1))
+            l3x_ = l3x_ * (1.0 + gate_prob - gate_prob.detach())
         return l3x_, {
             "routing/router_loss": router_loss,
             "routing/aux_loss": aux_loss,
@@ -184,7 +182,8 @@ class MoELayerStacks(nn.Module):
             "routing/avg_gate_prob": avg_gate_prob,
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
-            "routing/tau": x.new_tensor(tau if self.training else 0.0),
+            "routing/tau": x.new_tensor(0.0),
+            "routing/expert_output_std": expert_output_std,
         }
 
     @torch.no_grad()

@@ -27,7 +27,7 @@ class BaseTrainingConfig:
     gumbel_tau_start: float = 2.0
     gumbel_tau_end: float = 0.3
     gumbel_anneal_fraction: float = 0.3
-    router_lr_multiplier: float = 1.0
+    router_lr_multiplier: float = 0.1
 
     lr: float = 8.75e-4
     gamma: float = 0.992

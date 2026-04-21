@@ -85,6 +85,7 @@ class RoutingMetricsAccumulator:
     top1_prob_sum: torch.Tensor
     fraction_routed_sum: torch.Tensor
     avg_gate_prob_sum: torch.Tensor
+    expert_output_std_sum: torch.Tensor
     last_tau: float
 
     @classmethod
@@ -108,6 +109,7 @@ class RoutingMetricsAccumulator:
             avg_gate_prob_sum=torch.zeros_like(
                 avg_gate_prob.detach(), dtype=torch.float32
             ),
+            expert_output_std_sum=torch.zeros((), device=device, dtype=torch.float32),
             last_tau=0.0,
         )
 
@@ -137,6 +139,11 @@ class RoutingMetricsAccumulator:
         self.top1_prob_sum.add_(top1_prob.detach().to(dtype=torch.float32))
         self.fraction_routed_sum.add_(fraction_routed.detach().to(dtype=torch.float32))
         self.avg_gate_prob_sum.add_(avg_gate_prob.detach().to(dtype=torch.float32))
+        expert_output_std = log_dict.get("routing/expert_output_std")
+        if expert_output_std is not None:
+            self.expert_output_std_sum.add_(
+                expert_output_std.detach().to(dtype=torch.float32)
+            )
         tau = log_dict.get("routing/tau")
         if tau is not None:
             self.last_tau = float(tau.detach().cpu().item())
@@ -173,6 +180,9 @@ class RoutingMetricsAccumulator:
             "routing/load_cv_epoch": load_cv,
             "routing/experts_used_epoch": experts_used,
             "routing/dead_experts_epoch": dead_experts,
+            "routing/expert_output_std_epoch": float(
+                (self.expert_output_std_sum / denom).detach().cpu().item()
+            ),
             "routing/load_hist_epoch": wandb.Histogram(avg_fraction_routed.tolist()),
             "routing/prob_hist_epoch": wandb.Histogram(avg_gate_prob.tolist()),
         }
