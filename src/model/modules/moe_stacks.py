@@ -38,6 +38,8 @@ class MoELayerStacks(nn.Module):
         with torch.no_grad():
             self.output.linear.bias.zero_()
 
+        self._diversify_expert_inits()
+
     def set_training_progress(self, progress: float) -> None:
         """Set training progress (0.0 to 1.0) for tau annealing."""
         self._training_progress = progress
@@ -54,6 +56,22 @@ class MoELayerStacks(nn.Module):
     def _reset_router(self) -> None:
         nn.init.normal_(self.router.weight, mean=0.0, std=0.1)
         self.router.bias.zero_()
+
+    @torch.no_grad()
+    def _diversify_expert_inits(self) -> None:
+        """Re-initialize each expert with independent random weights to break symmetry."""
+        for layer in (self.l1, self.l2, self.output):
+            for i in range(self.num_experts):
+                begin = i * layer.out_features
+                end = (i + 1) * layer.out_features
+                nn.init.kaiming_uniform_(
+                    layer.linear.weight[begin:end, :], a=math.sqrt(5)
+                )
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(
+                    layer.linear.weight[begin:end, :]
+                )
+                bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+                nn.init.uniform_(layer.linear.bias[begin:end], -bound, bound)
 
     def _expert_params(self, layer: StackedLinear) -> tuple[torch.Tensor, torch.Tensor]:
         weight = layer.linear.weight.view(
@@ -146,7 +164,7 @@ class MoELayerStacks(nn.Module):
         if self.training:
             # All-experts forward + Gumbel-Softmax soft mixing for gradient flow
             all_outputs = self._all_experts_forward(x)  # (B, E, 1)
-            routing_weights = F.gumbel_softmax(gate_logits, tau=tau, hard=False)
+            routing_weights = F.gumbel_softmax(gate_logits, tau=tau, hard=True)
             l3x_ = (all_outputs * routing_weights.unsqueeze(-1)).sum(dim=1)  # (B, 1)
         else:
             # Inference: hard argmax, single expert (sparse kernel on CUDA)
