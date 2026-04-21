@@ -19,15 +19,15 @@ class LayerStacksConfig:
     """what types of stacks to use"""
     num_experts: int = 8
     """number of experts used when stacks='moe'"""
-    aux_loss_alpha: float = 0.0
+    aux_loss_alpha: float = 0.001
     """Switch-style load-balancing coefficient for MoE routing"""
-    z_loss_alpha: float = 1e-3
+    z_loss_alpha: float = 0.0
     """router z-loss coefficient for MoE routing"""
     gumbel_tau_start: float = 2.0
     """Gumbel-Softmax starting temperature (high = soft/exploratory)"""
     gumbel_tau_end: float = 0.3
     """Gumbel-Softmax ending temperature (low = sharp/committed)"""
-    gumbel_anneal_fraction: float = 0.15
+    gumbel_anneal_fraction: float = 0.3
     """Fraction of total training over which to anneal tau"""
 
     def __post_init__(self) -> None:

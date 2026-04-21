@@ -52,12 +52,10 @@ class MoELayerStacks(nn.Module):
 
     @torch.no_grad()
     def _reset_router(self) -> None:
-        nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
+        nn.init.normal_(self.router.weight, mean=0.0, std=0.1)
         self.router.bias.zero_()
 
-    def _expert_params(
-        self, layer: StackedLinear
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _expert_params(self, layer: StackedLinear) -> tuple[torch.Tensor, torch.Tensor]:
         weight = layer.linear.weight.view(
             layer.count, layer.out_features, layer.in_features
         )
@@ -118,8 +116,13 @@ class MoELayerStacks(nn.Module):
         _ls_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         half = x.shape[1] // 2
-        router_input = torch.cat([x[:, :self.ROUTER_FEATURES_PER_PERSPECTIVE],
-                                  x[:, half:half + self.ROUTER_FEATURES_PER_PERSPECTIVE]], dim=1)
+        router_input = torch.cat(
+            [
+                x[:, : self.ROUTER_FEATURES_PER_PERSPECTIVE],
+                x[:, half : half + self.ROUTER_FEATURES_PER_PERSPECTIVE],
+            ],
+            dim=1,
+        )
         gate_logits = self.router(router_input)
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
@@ -137,17 +140,13 @@ class MoELayerStacks(nn.Module):
         router_loss = x.new_zeros(())
         if self.training:
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
-            router_loss = (
-                router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
-            )
+            router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
 
+        tau = self.current_tau
         if self.training:
             # All-experts forward + Gumbel-Softmax soft mixing for gradient flow
             all_outputs = self._all_experts_forward(x)  # (B, E, 1)
-            tau = self.current_tau
-            routing_weights = F.gumbel_softmax(
-                gate_logits, tau=tau, hard=True
-            )
+            routing_weights = F.gumbel_softmax(gate_logits, tau=tau, hard=False)
             l3x_ = (all_outputs * routing_weights.unsqueeze(-1)).sum(dim=1)  # (B, 1)
         else:
             # Inference: hard argmax, single expert (sparse kernel on CUDA)

@@ -22,12 +22,12 @@ class BaseTrainingConfig:
     l3: int = 32
     stacks: Stacks = "layer"
     num_experts: int = 8
-    aux_loss_alpha: float = 0.0
-    z_loss_alpha: float = 1e-3
+    aux_loss_alpha: float = 0.001
+    z_loss_alpha: float = 0.0
     gumbel_tau_start: float = 2.0
     gumbel_tau_end: float = 0.3
-    gumbel_anneal_fraction: float = 0.15
-    router_lr_multiplier: float = 0.1
+    gumbel_anneal_fraction: float = 0.3
+    router_lr_multiplier: float = 1.0
 
     lr: float = 8.75e-4
     gamma: float = 0.992
