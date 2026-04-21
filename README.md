@@ -14,7 +14,7 @@
 data download
 
 ```bash
-uvx --from huggingface_hub hf download --repo-type dataset --local-dir /data official-stockfish/master-binpacks nodes5000pv2_UHO.binpack wrongIsRight_nodes5000pv2.binpack
+uvx --from huggingface_hub hf download --repo-type dataset --local-dir . official-stockfish/master-binpacks nodes5000pv2_UHO.binpack wrongIsRight_nodes5000pv2.binpack
 
 uvx hf download official-stockfish/master-binpacks multinet_pv-2_diff-100_nodes-5000.binpack dfrc_n5000.binpack --repo-type dataset --local-dir .
 

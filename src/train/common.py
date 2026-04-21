@@ -122,6 +122,7 @@ def build_training_state(
         gumbel_tau_start=args.gumbel_tau_start,
         gumbel_tau_end=args.gumbel_tau_end,
         gumbel_anneal_fraction=args.gumbel_anneal_fraction,
+        curriculum_epochs=args.curriculum_epochs,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
@@ -224,6 +225,7 @@ def run_training(
     try:
         for epoch in range(start_epoch, args.max_epochs):
             model.train()
+            model.set_epoch(epoch)
             # Update tau annealing progress for MoE
             if args.stacks == "moe":
                 progress = epoch / args.max_epochs

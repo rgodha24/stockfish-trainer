@@ -26,7 +26,9 @@ class MoELayerStacks(nn.Module):
         self.gumbel_tau_start = config.gumbel_tau_start
         self.gumbel_tau_end = config.gumbel_tau_end
         self.gumbel_anneal_fraction = config.gumbel_anneal_fraction
+        self.curriculum_epochs = config.curriculum_epochs
         self._training_progress: float = 0.0
+        self._current_epoch: int = 0
 
         self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
         self._reset_router()
@@ -41,6 +43,10 @@ class MoELayerStacks(nn.Module):
     def set_training_progress(self, progress: float) -> None:
         """Set training progress (0.0 to 1.0) for tau annealing."""
         self._training_progress = progress
+
+    def set_current_epoch(self, epoch: int) -> None:
+        """Set current epoch for curriculum scheduling."""
+        self._current_epoch = epoch
 
     @property
     def current_tau(self) -> float:
@@ -131,6 +137,14 @@ class MoELayerStacks(nn.Module):
         x: torch.Tensor,
         _ls_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        # Curriculum: use piece-count buckets as hard expert indices
+        in_curriculum = (
+            self.training
+            and self.curriculum_epochs > 0
+            and self._current_epoch < self.curriculum_epochs
+            and _ls_indices is not None
+        )
+
         half = x.shape[1] // 2
         router_input = torch.cat(
             [
@@ -141,7 +155,17 @@ class MoELayerStacks(nn.Module):
         )
         gate_logits = self.router(router_input)
         gate_probs = F.softmax(gate_logits, dim=-1)
-        expert_indices = gate_logits.argmax(dim=-1)
+
+        if in_curriculum:
+            # Hard curriculum routing based on piece-count buckets
+            assert _ls_indices is not None
+            expert_indices = _ls_indices.long() % self.num_experts
+            # Zero out router gradients during curriculum
+            gate_logits = gate_logits.detach()
+            gate_probs = gate_probs.detach()
+        else:
+            expert_indices = gate_logits.argmax(dim=-1)
+
         fraction_routed = torch.bincount(expert_indices, minlength=self.num_experts).to(
             gate_probs.dtype
         ) / gate_probs.new_tensor(float(expert_indices.numel()))
@@ -154,24 +178,30 @@ class MoELayerStacks(nn.Module):
         )
         top1_prob = gate_probs.max(dim=-1).values.mean()
         router_loss = x.new_zeros(())
-        if self.training:
+        if self.training and not in_curriculum:
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
 
-        all_outputs = self._all_experts_forward(x)  # (B, E, 1)
-        expert_output_std = all_outputs.std(dim=1).mean()
         # Hard argmax routing (matches inference; sparse kernel on CUDA)
-        if x.is_cuda and x.dtype == torch.float32 and not self.training:
+        if x.is_cuda and x.dtype == torch.float32:
             l3x_ = self._sparse_forward(x, expert_indices)
         else:
-            l3x_ = all_outputs.gather(
-                1, expert_indices.view(-1, 1, 1).expand(-1, 1, all_outputs.shape[2])
-            ).squeeze(1)
-        if self.training:
+            l3x_ = (
+                self._all_experts_forward(x)
+                .gather(1, expert_indices.view(-1, 1, 1).expand(-1, 1, 1))
+                .squeeze(1)
+            )
+        if self.training and not in_curriculum:
             # Straight-through estimator: forward value stays unscaled,
             # but router gets gradients through gate_prob.
             gate_prob = gate_probs.gather(1, expert_indices.unsqueeze(1))
             l3x_ = l3x_ * (1.0 + gate_prob - gate_prob.detach())
+        # Expert diversity metric (computed on a small subset for efficiency)
+        with torch.no_grad():
+            sample = min(256, x.shape[0])
+            sample_idx = torch.randperm(x.shape[0])[:sample]
+            sample_out = self._all_experts_forward(x[sample_idx])
+            expert_output_std = sample_out.std(dim=1).mean()
         return l3x_, {
             "routing/router_loss": router_loss,
             "routing/aux_loss": aux_loss,
@@ -182,6 +212,7 @@ class MoELayerStacks(nn.Module):
             "routing/top1_prob": top1_prob,
             "routing/tau": x.new_tensor(0.0),
             "routing/expert_output_std": expert_output_std,
+            "routing/in_curriculum": x.new_tensor(1.0 if in_curriculum else 0.0),
         }
 
     @torch.no_grad()

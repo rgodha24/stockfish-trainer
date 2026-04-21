@@ -107,7 +107,9 @@ class NNUEModel(nn.Module):
         # and it's more efficient to divide by 128 instead.
         pairwise_chunk_size = self.L1 // 2
         l0_ = l0_.reshape(l0_.shape[0], 2, 2, pairwise_chunk_size)
-        l0_ = (l0_[:, :, 0, :] * l0_[:, :, 1, :]).reshape(l0_.shape[0], -1) * (127 / 128)
+        l0_ = (l0_[:, :, 0, :] * l0_[:, :, 1, :]).reshape(l0_.shape[0], -1) * (
+            127 / 128
+        )
 
         psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
         wpsqt = wpsqt.gather(1, psqt_indices_unsq)
@@ -119,3 +121,8 @@ class NNUEModel(nn.Module):
 
         stacks_out, log_dict = self.layer_stacks(l0_, layer_stack_indices)
         return stacks_out + psqt, log_dict
+
+    def set_epoch(self, epoch: int) -> None:
+        """Propagate epoch number to layer stacks for curriculum scheduling."""
+        if self.stacks == "moe":
+            self.layer_stacks.set_current_epoch(epoch)

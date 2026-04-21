@@ -29,6 +29,8 @@ class LayerStacksConfig:
     """Gumbel-Softmax ending temperature (low = sharp/committed)"""
     gumbel_anneal_fraction: float = 0.3
     """Fraction of total training over which to anneal tau"""
+    curriculum_epochs: int = 0
+    """Number of epochs to use hard piece-count routing before switching to learned router."""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:
