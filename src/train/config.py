@@ -24,12 +24,7 @@ class BaseTrainingConfig:
     num_experts: int = 8
     aux_loss_alpha: float = 0.001
     z_loss_alpha: float = 0.0
-    gumbel_tau_start: float = 2.0
-    gumbel_tau_end: float = 0.3
-    gumbel_anneal_fraction: float = 0.3
     router_lr_multiplier: float = 0.1
-    curriculum_epochs: int = 0
-    """Number of epochs to use hard piece-count routing before learned router."""
 
     lr: float = 8.75e-4
     gamma: float = 0.992

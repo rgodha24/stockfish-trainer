@@ -152,9 +152,7 @@ class NNUEWriter:
         # --- Header ---
         # C++ Network::hash = FT_hash ^ Arch_hash ^ Router_hash
         self.int32(VERSION)
-        self.int32(
-            fc_hash ^ model.feature_hash ^ (self.effective_l1 * 2) ^ ROUTER_HASH
-        )
+        self.int32(fc_hash ^ model.feature_hash ^ (self.effective_l1 * 2) ^ ROUTER_HASH)
         desc_bytes = description.encode("utf-8")
         self.int32(len(desc_bytes))
         self.buf.extend(desc_bytes)
@@ -291,9 +289,6 @@ def _model_from_checkpoint(path: str) -> NNUEModel:
         num_experts=cfg_dict.get("num_experts", 8),
         aux_loss_alpha=cfg_dict.get("aux_loss_alpha", 0.0),
         z_loss_alpha=cfg_dict.get("z_loss_alpha", 1e-3),
-        gumbel_tau_start=cfg_dict.get("gumbel_tau_start", 2.0),
-        gumbel_tau_end=cfg_dict.get("gumbel_tau_end", 0.3),
-        gumbel_anneal_fraction=cfg_dict.get("gumbel_anneal_fraction", 0.15),
     )
     features = cfg_dict.get("features", "Full_Threats+HalfKAv2_hm^")
 

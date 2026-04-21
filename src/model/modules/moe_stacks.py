@@ -23,12 +23,7 @@ class MoELayerStacks(nn.Module):
         self.L3 = config.L3
         self.aux_loss_alpha = config.aux_loss_alpha
         self.z_loss_alpha = config.z_loss_alpha
-        self.gumbel_tau_start = config.gumbel_tau_start
-        self.gumbel_tau_end = config.gumbel_tau_end
-        self.gumbel_anneal_fraction = config.gumbel_anneal_fraction
-        self.curriculum_epochs = config.curriculum_epochs
-        self._training_progress: float = 0.0
-        self._current_epoch: int = 0
+        self.register_buffer("_curriculum_alpha", torch.tensor(0.0))
 
         self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
         self._reset_router()
@@ -40,21 +35,10 @@ class MoELayerStacks(nn.Module):
         with torch.no_grad():
             self.output.linear.bias.zero_()
 
-    def set_training_progress(self, progress: float) -> None:
-        """Set training progress (0.0 to 1.0) for tau annealing."""
-        self._training_progress = progress
-
     def set_current_epoch(self, epoch: int) -> None:
         """Set current epoch for curriculum scheduling."""
-        self._current_epoch = epoch
-
-    @property
-    def current_tau(self) -> float:
-        """Compute current Gumbel-Softmax temperature from training progress."""
-        if self._training_progress >= self.gumbel_anneal_fraction:
-            return self.gumbel_tau_end
-        t = self._training_progress / self.gumbel_anneal_fraction
-        return self.gumbel_tau_start + (self.gumbel_tau_end - self.gumbel_tau_start) * t
+        alpha = max(0.0, min(5.0 * math.exp(-(epoch - 15) / 10.0) - 0.02, 3.0))
+        self._curriculum_alpha.fill_(alpha)
 
     @torch.no_grad()
     def _reset_router(self) -> None:
@@ -137,14 +121,6 @@ class MoELayerStacks(nn.Module):
         x: torch.Tensor,
         _ls_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        # Curriculum: use piece-count buckets as hard expert indices
-        in_curriculum = (
-            self.training
-            and self.curriculum_epochs > 0
-            and self._current_epoch < self.curriculum_epochs
-            and _ls_indices is not None
-        )
-
         half = x.shape[1] // 2
         router_input = torch.cat(
             [
@@ -154,17 +130,16 @@ class MoELayerStacks(nn.Module):
             dim=1,
         )
         gate_logits = self.router(router_input)
-        gate_probs = F.softmax(gate_logits, dim=-1)
 
-        if in_curriculum:
-            # Hard curriculum routing based on piece-count buckets
-            assert _ls_indices is not None
-            expert_indices = _ls_indices.long() % self.num_experts
-            # Zero out router gradients during curriculum
-            gate_logits = gate_logits.detach()
-            gate_probs = gate_probs.detach()
-        else:
-            expert_indices = gate_logits.argmax(dim=-1)
+        # Piece-count curriculum bias: always present, alpha decays 8 -> 0.
+        assert _ls_indices is not None
+        bias = F.one_hot(_ls_indices, num_classes=self.num_experts).to(
+            gate_logits.dtype
+        )
+        gate_logits = gate_logits + bias * self._curriculum_alpha
+
+        gate_probs = F.softmax(gate_logits, dim=-1)
+        expert_indices = gate_logits.argmax(dim=-1)
 
         fraction_routed = torch.bincount(expert_indices, minlength=self.num_experts).to(
             gate_probs.dtype
@@ -178,7 +153,7 @@ class MoELayerStacks(nn.Module):
         )
         top1_prob = gate_probs.max(dim=-1).values.mean()
         router_loss = x.new_zeros(())
-        if self.training and not in_curriculum:
+        if self.training:
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
 
@@ -191,7 +166,7 @@ class MoELayerStacks(nn.Module):
                 .gather(1, expert_indices.view(-1, 1, 1).expand(-1, 1, 1))
                 .squeeze(1)
             )
-        if self.training and not in_curriculum:
+        if self.training:
             # Straight-through estimator: forward value stays unscaled,
             # but router gets gradients through gate_prob.
             gate_prob = gate_probs.gather(1, expert_indices.unsqueeze(1))
@@ -212,7 +187,7 @@ class MoELayerStacks(nn.Module):
             "routing/top1_prob": top1_prob,
             "routing/tau": x.new_tensor(0.0),
             "routing/expert_output_std": expert_output_std,
-            "routing/in_curriculum": x.new_tensor(1.0 if in_curriculum else 0.0),
+            "routing/curriculum_alpha": x.new_tensor(self._curriculum_alpha),
         }
 
     @torch.no_grad()

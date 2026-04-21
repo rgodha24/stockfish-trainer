@@ -23,14 +23,6 @@ class LayerStacksConfig:
     """Switch-style load-balancing coefficient for MoE routing"""
     z_loss_alpha: float = 0.0
     """router z-loss coefficient for MoE routing"""
-    gumbel_tau_start: float = 2.0
-    """Gumbel-Softmax starting temperature (high = soft/exploratory)"""
-    gumbel_tau_end: float = 0.3
-    """Gumbel-Softmax ending temperature (low = sharp/committed)"""
-    gumbel_anneal_fraction: float = 0.3
-    """Fraction of total training over which to anneal tau"""
-    curriculum_epochs: int = 0
-    """Number of epochs to use hard piece-count routing before switching to learned router."""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:

@@ -119,10 +119,6 @@ def build_training_state(
         num_experts=args.num_experts,
         aux_loss_alpha=args.aux_loss_alpha,
         z_loss_alpha=args.z_loss_alpha,
-        gumbel_tau_start=args.gumbel_tau_start,
-        gumbel_tau_end=args.gumbel_tau_end,
-        gumbel_anneal_fraction=args.gumbel_anneal_fraction,
-        curriculum_epochs=args.curriculum_epochs,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
@@ -226,10 +222,6 @@ def run_training(
         for epoch in range(start_epoch, args.max_epochs):
             model.train()
             model.set_epoch(epoch)
-            # Update tau annealing progress for MoE
-            if args.stacks == "moe":
-                progress = epoch / args.max_epochs
-                model.layer_stacks.set_training_progress(progress)
             epoch_loss_sum = torch.zeros((), device=device)
             epoch_start = time.time()
             processed_batches = 0
