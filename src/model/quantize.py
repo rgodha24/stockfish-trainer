@@ -51,7 +51,7 @@ class QuantizationManager:
         factorized = getattr(model.layer_stacks.l1, "factorized_linear", None)
         if factorized is not None:
             l1_config["virtual_params"] = factorized.weight
-        return [
+        groups = [
             l1_config,
             {
                 "params": [model.layer_stacks.l2.linear.weight],
@@ -64,6 +64,14 @@ class QuantizationManager:
                 "max_weight": self.max_out_weight,
             },
         ]
+        # Router uses same quantization scales as hidden FC layers
+        if hasattr(model.layer_stacks, "router"):
+            groups.append({
+                "params": [model.layer_stacks.router.weight],
+                "min_weight": -self.max_hidden_weight,
+                "max_weight": self.max_hidden_weight,
+            })
+        return groups
 
     def quantize_feature_transformer(
         self,

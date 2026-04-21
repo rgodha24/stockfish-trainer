@@ -11,14 +11,16 @@ from .stacked_linear import StackedLinear
 
 
 class MoELayerStacks(nn.Module):
+    # Router reads first 32 post-pairwise features from each perspective.
+    ROUTER_FEATURES_PER_PERSPECTIVE: int = 32
+    ROUTER_INPUT_DIM: int = ROUTER_FEATURES_PER_PERSPECTIVE * 2  # 64
+
     def __init__(self, num_experts: int, config: LayerStacksConfig):
         super().__init__()
 
         self.num_experts = num_experts
         self.L2 = config.L2
         self.L3 = config.L3
-        self.router_input_dim = config.router_features
-        self.expert_input_dim = config.eval_features_per_perspective
         self.aux_loss_alpha = config.aux_loss_alpha
         self.z_loss_alpha = config.z_loss_alpha
         self.gumbel_tau_start = config.gumbel_tau_start
@@ -26,13 +28,10 @@ class MoELayerStacks(nn.Module):
         self.gumbel_anneal_fraction = config.gumbel_anneal_fraction
         self._training_progress: float = 0.0
 
-        # Router input: accumulator features + one-hot piece-count bucket
-        self.router = nn.Linear(self.router_input_dim + num_experts, num_experts)
+        self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
         self._reset_router()
 
-        self.l1 = StackedLinear(
-            self.expert_input_dim, self.L2 + 1, num_experts
-        )
+        self.l1 = StackedLinear(config.L1, self.L2 + 1, num_experts)
         self.l2 = StackedLinear(self.L2 * 2, self.L3, num_experts)
         self.output = StackedLinear(self.L3, 1, num_experts)
 
@@ -55,11 +54,6 @@ class MoELayerStacks(nn.Module):
     def _reset_router(self) -> None:
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.router.bias.zero_()
-        # Warm-start: piece-count bucket columns get identity-like init
-        # so expert i strongly prefers bucket i from step 0
-        bucket_cols = self.router.weight[:, self.router_input_dim :]
-        bucket_cols.zero_()
-        bucket_cols.add_(torch.eye(self.num_experts) * 5.0)
 
     def _expert_params(
         self, layer: StackedLinear
@@ -72,12 +66,12 @@ class MoELayerStacks(nn.Module):
 
     def _all_experts_forward(
         self,
-        expert_input: torch.Tensor,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         """Compute all experts in parallel. Returns (B, num_experts, 1)."""
         # l1: (B, in) -> (B, num_experts, L2+1)
         l1_w, l1_b = self._expert_params(self.l1)
-        l1c_ = torch.einsum("bi,eoi->beo", expert_input, l1_w) + l1_b
+        l1c_ = torch.einsum("bi,eoi->beo", x, l1_w) + l1_b
 
         l1x_, l1x_out = l1c_.split(self.L2, dim=2)
         l1x_ = torch.clamp(
@@ -98,11 +92,11 @@ class MoELayerStacks(nn.Module):
 
     def _sparse_forward(
         self,
-        expert_input: torch.Tensor,
+        x: torch.Tensor,
         expert_indices: torch.Tensor,
     ) -> torch.Tensor:
         l1_weight, l1_bias = self._expert_params(self.l1)
-        l1c_ = sparse_expert_linear(expert_input, expert_indices, l1_weight, l1_bias)
+        l1c_ = sparse_expert_linear(x, expert_indices, l1_weight, l1_bias)
         l1x_, l1x_out = l1c_.split(self.L2, dim=1)
         l1x_ = torch.clamp(
             torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
@@ -120,15 +114,13 @@ class MoELayerStacks(nn.Module):
 
     def forward(
         self,
-        expert_input: torch.Tensor,
-        router_input: torch.Tensor,
-        layer_stack_indices: torch.Tensor,
+        x: torch.Tensor,
+        _ls_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        bucket_onehot = F.one_hot(
-            layer_stack_indices, num_classes=self.num_experts
-        ).float()
-        router_full = torch.cat([router_input.float(), bucket_onehot], dim=-1)
-        gate_logits = self.router(router_full)
+        half = x.shape[1] // 2
+        router_input = torch.cat([x[:, :self.ROUTER_FEATURES_PER_PERSPECTIVE],
+                                  x[:, half:half + self.ROUTER_FEATURES_PER_PERSPECTIVE]], dim=1)
+        gate_logits = self.router(router_input)
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
         fraction_routed = torch.bincount(expert_indices, minlength=self.num_experts).to(
@@ -142,16 +134,16 @@ class MoELayerStacks(nn.Module):
             math.log(max(self.num_experts, 2))
         )
         top1_prob = gate_probs.max(dim=-1).values.mean()
-        router_loss = expert_input.new_zeros(())
+        router_loss = x.new_zeros(())
         if self.training:
-            router_loss = expert_input.new_tensor(self.aux_loss_alpha) * aux_loss
+            router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = (
-                router_loss + expert_input.new_tensor(self.z_loss_alpha) * z_loss
+                router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
             )
 
         if self.training:
             # All-experts forward + Gumbel-Softmax soft mixing for gradient flow
-            all_outputs = self._all_experts_forward(expert_input)  # (B, E, 1)
+            all_outputs = self._all_experts_forward(x)  # (B, E, 1)
             tau = self.current_tau
             routing_weights = F.gumbel_softmax(
                 gate_logits, tau=tau, hard=True
@@ -159,10 +151,10 @@ class MoELayerStacks(nn.Module):
             l3x_ = (all_outputs * routing_weights.unsqueeze(-1)).sum(dim=1)  # (B, 1)
         else:
             # Inference: hard argmax, single expert (sparse kernel on CUDA)
-            if expert_input.is_cuda and expert_input.dtype == torch.float32:
-                l3x_ = self._sparse_forward(expert_input, expert_indices)
+            if x.is_cuda and x.dtype == torch.float32:
+                l3x_ = self._sparse_forward(x, expert_indices)
             else:
-                all_outputs = self._all_experts_forward(expert_input)
+                all_outputs = self._all_experts_forward(x)
                 l3x_ = all_outputs.gather(
                     1, expert_indices.view(-1, 1, 1).expand(-1, 1, all_outputs.shape[2])
                 ).squeeze(1)
@@ -175,7 +167,7 @@ class MoELayerStacks(nn.Module):
             "routing/avg_gate_prob": avg_gate_prob,
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
-            "routing/tau": expert_input.new_tensor(tau if self.training else 0.0),
+            "routing/tau": x.new_tensor(tau if self.training else 0.0),
         }
 
     @torch.no_grad()

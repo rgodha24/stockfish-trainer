@@ -117,7 +117,6 @@ def build_training_state(
         L3=args.l3,
         stacks=args.stacks,
         num_experts=args.num_experts,
-        router_features=args.router_features,
         aux_loss_alpha=args.aux_loss_alpha,
         z_loss_alpha=args.z_loss_alpha,
         gumbel_tau_start=args.gumbel_tau_start,

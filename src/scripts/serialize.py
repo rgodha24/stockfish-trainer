@@ -1,8 +1,15 @@
 """Export a trained model checkpoint to .nnue format for Stockfish.
 
 Supports standard LayerStacks models, shared/no-stack models, and MoE
-(Mixture of Experts) models. MoE models are written with VERSION_MOE and
-include a router section before the per-expert FC layers.
+(Mixture of Experts) models.  All models include a router section between
+the feature transformer and the per-bucket FC layers (C++ always reads it).
+MoE models write quantized router weights; non-MoE models write zeros.
+
+Binary layout (matches rgodha24/Stockfish @ fd1b945f):
+    [header]  VERSION(4) | hash(4) | desc_len(4) | desc
+    [FT]      ft_hash(4) | bias_i16 | per-feature weights | psqt_weights
+    [router]  bias_i32[8] | weight_i8[8 * 64]
+    [buckets] for each bucket: fc_hash(4) | l1 | l2 | output
 
 Usage:
     python -m src.scripts.serialize <source.pt> <target.nnue> [options]
@@ -26,20 +33,12 @@ from tyro.conf import OmitArgPrefixes, Positional
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.model.modules import MoELayerStacks
 
-# Standard format version (matches upstream nnue-pytorch / official Stockfish).
+# Format version (matches rgodha24/Stockfish fork — single version for all models).
 VERSION = 0x7AF32F20
 
-# MoE format version: extends the standard format by inserting a router section
-# between the feature transformer and the per-expert FC buckets.  A Stockfish
-# build that understands this version reads the router and uses it at inference;
-# an unmodified Stockfish will reject the file (wrong version hash).
-VERSION_MOE = 0x7AF32F21
-
-# Magic marker written at the start of the router section so a reader can
-# sanity-check it found the right place in the stream.
-ROUTER_SECTION_MAGIC = (
-    0xB00B5_0000  # arbitrary; fits in uint64 but we split into two int32s
-)
+# Router<64, 8>::get_hash_value(0) = 0xABCD1234 + 8 = 0xABCD123C.
+# Always included in the header hash (C++ Network::hash XORs it in).
+ROUTER_HASH = 0xABCD123C
 
 DEFAULT_DESCRIPTION = (
     "Network trained with the stockfish-trainer "
@@ -90,16 +89,11 @@ def _encode_leb_128_array(arr: npt.NDArray) -> bytes:
 def _fc_hash(model: NNUEModel) -> int:
     """Compute the Stockfish FC-layers hash for the model.
 
-    For non-MoE models the InputSlice dimension is ``L1 * 2`` (both
-    perspectives before the pairwise product). For MoE models it is
-    ``eval_features_per_perspective * 2`` because only the eval slice of the
-    accumulator is fed into the experts.
+    The InputSlice dimension is ``L1 * 2`` (both perspectives, post-pairwise).
+    This is the same for MoE and non-MoE models since the experts now see the
+    full post-pairwise features.
     """
-    is_moe = isinstance(model.layer_stacks, MoELayerStacks)
-    if is_moe:
-        input_slice_dim = model.eval_features_per_perspective * 2
-    else:
-        input_slice_dim = model.L1 * 2
+    input_slice_dim = model.L1 * 2
 
     prev_hash = 0xEC42E90D
     prev_hash ^= input_slice_dim
@@ -127,24 +121,12 @@ class NNUEWriter:
 
     All multi-byte integers are little-endian.
 
-    Standard format layout
-    ----------------------
+    Binary layout (matches rgodha24/Stockfish @ fd1b945f)
+    -----------------------------------------------------
     [header]  VERSION(4) | hash(4) | desc_len(4) | desc
     [FT]      ft_hash(4) | bias_i16 | per-feature weights | psqt_weights
-    [buckets] for each bucket: fc_hash(4) | l1_bias_i32 + l1_weight_i8 |
-                                            l2_bias_i32 + l2_weight_i8 |
-                                            out_bias_i32 + out_weight_i8
-
-    MoE format layout (VERSION_MOE)
-    --------------------------------
-    [header]  VERSION_MOE(4) | hash(4) | desc_len(4) | desc
-    [FT]      ft_hash(4) | bias_i16 | per-feature weights | psqt_weights
-    [router]  ROUTER_MAGIC_LO(4) | ROUTER_MAGIC_HI(4) |
-              num_experts(4) | router_input_dim(4) |
-              eval_features_per_perspective(4) |
-              router_weight_f32[router_input_dim * num_experts] |
-              router_bias_f32[num_experts]
-    [experts] same as standard buckets, one entry per expert
+    [router]  bias_i32[8] | weight_i8[8 * 64]   (always present)
+    [buckets] for each bucket: fc_hash(4) | l1 | l2 | output
     """
 
     def __init__(
@@ -152,30 +134,37 @@ class NNUEWriter:
         model: NNUEModel,
         description: str | None = None,
         ft_compression: Literal["none", "leb128"] = "leb128",
+        pad_l1: int | None = None,
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
 
         self.buf = bytearray()
-        is_moe = isinstance(model.layer_stacks, MoELayerStacks)
+
+        # Effective L1 after optional padding (for SIMD tiling tests)
+        self.effective_l1 = pad_l1 if pad_l1 is not None else model.L1
+        self.pad_amount = self.effective_l1 - model.L1
+        if self.pad_amount < 0:
+            raise ValueError(f"pad_l1={pad_l1} is smaller than model L1={model.L1}")
 
         fc_hash = _fc_hash(model)
 
         # --- Header ---
-        version = VERSION_MOE if is_moe else VERSION
-        self.int32(version)
-        self.int32(fc_hash ^ model.feature_hash ^ (model.L1 * 2))
+        # C++ Network::hash = FT_hash ^ Arch_hash ^ Router_hash
+        self.int32(VERSION)
+        self.int32(
+            fc_hash ^ model.feature_hash ^ (self.effective_l1 * 2) ^ ROUTER_HASH
+        )
         desc_bytes = description.encode("utf-8")
         self.int32(len(desc_bytes))
         self.buf.extend(desc_bytes)
 
         # --- Feature transformer ---
-        self.int32(model.feature_hash ^ (model.L1 * 2))
+        self.int32(model.feature_hash ^ (self.effective_l1 * 2))
         self._write_feature_transformer(model, ft_compression)
 
-        # --- Router (MoE only) ---
-        if is_moe:
-            self._write_router(model)
+        # --- Router (always present; zeros for non-MoE) ---
+        self._write_router(model)
 
         # --- Per-bucket / per-expert FC layers ---
         for l1, l2, output in model.layer_stacks.get_coalesced_layer_stacks():
@@ -200,6 +189,11 @@ class NNUEWriter:
             bias, weight, psqt_weight
         )
 
+        # Pad FT to effective_l1 (zero-fill extra neurons at the end)
+        if self.pad_amount > 0:
+            bias = torch.nn.functional.pad(bias, (0, self.pad_amount))
+            weight = torch.nn.functional.pad(weight, (0, self.pad_amount))
+
         self._write_tensor(bias.flatten().numpy(), ft_compression)
         offset = 0
         for f in layer.features:
@@ -215,26 +209,29 @@ class NNUEWriter:
     # -- Router -----------------------------------------------------------
 
     def _write_router(self, model: NNUEModel) -> None:
+        """Write Router<64, 8> data: int32 biases[8] then int8 weights[8*64].
+
+        C++ router.read_parameters() reads biases then weights with no
+        framing (no hash prefix, no magic marker, no metadata).
+        For non-MoE models we write zeros so the C++ reader stays happy.
+        """
+        num_experts = 8
+        router_input_dim = 64  # Router<64, 8>
+
         stacks = model.layer_stacks
-        assert isinstance(stacks, MoELayerStacks)
+        if isinstance(stacks, MoELayerStacks):
+            bias, weight = model.quantization.quantize_fc_layer(
+                stacks.router.bias.data,
+                stacks.router.weight.data,
+                output_layer=False,
+            )
+        else:
+            # Non-MoE: write zeros (C++ still reads the router section)
+            bias = torch.zeros(num_experts, dtype=torch.int32)
+            weight = torch.zeros(num_experts, router_input_dim, dtype=torch.int8)
 
-        # Magic (split into two int32s to stay within uint32 range each)
-        self.int32(ROUTER_SECTION_MAGIC & 0xFFFFFFFF)
-        self.int32((ROUTER_SECTION_MAGIC >> 32) & 0xFFFFFFFF)
-
-        # Metadata
-        self.int32(stacks.num_experts)
-        self.int32(stacks.router_input_dim)  # = router_features (both perspectives)
-        self.int32(model.eval_features_per_perspective)
-
-        # Weights stored as [num_experts][router_input_dim] in row-major order.
-        # PyTorch nn.Linear stores weight as [out, in] which is already that shape.
-        weight = (
-            stacks.router.weight.data.cpu().float()
-        )  # [num_experts, router_input_dim]
-        bias = stacks.router.bias.data.cpu().float()  # [num_experts]
-        self.buf.extend(weight.numpy().tobytes())
-        self.buf.extend(bias.numpy().tobytes())
+        self.buf.extend(bias.flatten().numpy().tobytes())
+        self.buf.extend(weight.flatten().numpy().tobytes())
 
     # -- FC layers --------------------------------------------------------
 
@@ -292,7 +289,6 @@ def _model_from_checkpoint(path: str) -> NNUEModel:
         L3=cfg_dict.get("l3", 32),
         stacks=cfg_dict.get("stacks") or "layer",
         num_experts=cfg_dict.get("num_experts", 8),
-        router_features=cfg_dict.get("router_features", 32),
         aux_loss_alpha=cfg_dict.get("aux_loss_alpha", 0.0),
         z_loss_alpha=cfg_dict.get("z_loss_alpha", 1e-3),
         gumbel_tau_start=cfg_dict.get("gumbel_tau_start", 2.0),
@@ -326,8 +322,7 @@ def _describe_model_for_export(model: NNUEModel) -> str:
         stacks = model.layer_stacks
         return (
             f"  MoE model: {stacks.num_experts} experts, "
-            f"router_input_dim={stacks.router_input_dim}, "
-            f"eval_features_per_perspective={model.eval_features_per_perspective}"
+            f"router_input_dim={stacks.ROUTER_INPUT_DIM}, L1={model.L1}"
         )
 
     count = model.layer_stacks.count
@@ -352,6 +347,10 @@ class SerializeConfig:
 
     ft_compression: Literal["none", "leb128"] = "leb128"
     """Compression method for FT arrays in .nnue output."""
+
+    pad_l1: Optional[int] = None
+    """Pad feature transformer from model's L1 to this value (zero-fill).
+    Useful for testing SIMD tiling effects without retraining."""
 
 
 @dataclass(frozen=True)
@@ -391,6 +390,7 @@ def main() -> None:
             model,
             description=cfg.description,
             ft_compression=cfg.ft_compression,
+            pad_l1=cfg.pad_l1,
         )
         buf = bytes(writer.buf)
 

@@ -30,9 +30,6 @@ class NNUEModel(nn.Module):
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
         self.stacks = config.stacks
-        self.router_features = config.router_features
-        self.router_features_per_perspective = config.router_features_per_perspective
-        self.eval_features_per_perspective = config.eval_features_per_perspective
         if self.stacks == "moe":
             self.layer_stacks = MoELayerStacks(config.num_experts, config)
         else:
@@ -101,27 +98,14 @@ class NNUEModel(nn.Module):
         w, wpsqt = torch.split(wp, self.L1, dim=1)
         b, bpsqt = torch.split(bp, self.L1, dim=1)
 
-        if self.stacks == "moe":
-            # Compute each perspective half directly instead of
-            # cat→mul→add→split→split→cat (saves 2 large cat ops).
-            w_half = us * w + them * b
-            b_half = us * b + them * w
-            ef = self.eval_features_per_perspective
-            l0_ = torch.cat([w_half[:, :ef], b_half[:, :ef]], dim=1)
-            router_input = torch.cat([w_half[:, ef:], b_half[:, ef:]], dim=1)
-            router_input = torch.clamp(router_input, 0.0, 1.0)
-            pairwise_chunk_size = ef // 2
-        else:
-            router_input = None
-            l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
-            pairwise_chunk_size = self.L1 // 2
-
+        l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
         l0_ = torch.clamp(l0_, 0.0, 1.0)
 
         # Pairwise products: multiply first half by second half of each
         # perspective. Reshape avoids split→cat overhead.
         # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         # and it's more efficient to divide by 128 instead.
+        pairwise_chunk_size = self.L1 // 2
         l0_ = l0_.reshape(l0_.shape[0], 2, 2, pairwise_chunk_size)
         l0_ = (l0_[:, :, 0, :] * l0_[:, :, 1, :]).reshape(l0_.shape[0], -1) * (127 / 128)
 
@@ -133,11 +117,5 @@ class NNUEModel(nn.Module):
         # which does both the averaging and sign flip for black to move)
         psqt = (wpsqt - bpsqt) * (us - 0.5)
 
-        if self.stacks == "moe":
-            stacks_out, log_dict = self.layer_stacks(
-                l0_, router_input, layer_stack_indices
-            )
-            return stacks_out + psqt, log_dict
-        else:
-            stacks_out, log_dict = self.layer_stacks(l0_, layer_stack_indices)
-            return stacks_out + psqt, log_dict
+        stacks_out, log_dict = self.layer_stacks(l0_, layer_stack_indices)
+        return stacks_out + psqt, log_dict

@@ -22,7 +22,6 @@ class BaseTrainingConfig:
     l3: int = 32
     stacks: Stacks = "layer"
     num_experts: int = 8
-    router_features: int = 32
     aux_loss_alpha: float = 0.0
     z_loss_alpha: float = 1e-3
     gumbel_tau_start: float = 2.0
@@ -86,26 +85,10 @@ class BaseTrainingConfig:
             raise ValueError("`l1` must be even.")
         if self.num_experts <= 0:
             raise ValueError("`num_experts` must be positive.")
-        if self.router_features < 0 or self.router_features % 2 != 0:
-            raise ValueError("`router_features` must be a non-negative even number.")
         if self.aux_loss_alpha < 0.0:
             raise ValueError("`aux_loss_alpha` must be non-negative.")
         if self.z_loss_alpha < 0.0:
             raise ValueError("`z_loss_alpha` must be non-negative.")
-        if self.stacks == "moe":
-            if self.router_features == 0:
-                raise ValueError(
-                    "`router_features` must be positive when stacks='moe'."
-                )
-            eval_features_per_perspective = self.l1 - self.router_features // 2
-            if eval_features_per_perspective <= 0:
-                raise ValueError(
-                    "`router_features` must leave positive eval features per perspective."
-                )
-            if eval_features_per_perspective % 2 != 0:
-                raise ValueError(
-                    "`l1 - router_features / 2` must be even for MoE pairwise combine."
-                )
 
     def loader_skip_config(self) -> DataloaderSkipConfig:
         return DataloaderSkipConfig(
