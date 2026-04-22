@@ -7,7 +7,7 @@ from torch import nn
 
 from .config import LayerStacksConfig
 from .sparse_expert_linear import sparse_expert_linear
-from .stacked_linear import StackedLinear
+from .stacked_linear import FactorizedStackedLinear, StackedLinear
 
 
 class MoELayerStacks(nn.Module):
@@ -28,7 +28,7 @@ class MoELayerStacks(nn.Module):
         self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
         self._reset_router()
 
-        self.l1 = StackedLinear(config.L1, self.L2 + 1, num_experts)
+        self.l1 = FactorizedStackedLinear(config.L1, self.L2 + 1, num_experts)
         self.l2 = StackedLinear(self.L2 * 2, self.L3, num_experts)
         self.output = StackedLinear(self.L3, 1, num_experts)
 
@@ -62,10 +62,13 @@ class MoELayerStacks(nn.Module):
                 nn.init.uniform_(layer.linear.bias[begin:end], -bound, bound)
 
     def _expert_params(self, layer: StackedLinear) -> tuple[torch.Tensor, torch.Tensor]:
-        weight = layer.linear.weight.view(
-            layer.count, layer.out_features, layer.in_features
-        )
-        bias = layer.linear.bias.view(layer.count, layer.out_features)
+        weight = layer.linear.weight
+        bias = layer.linear.bias
+        if hasattr(layer, "factorized_linear"):
+            weight = weight + layer.factorized_linear.weight.repeat(layer.count, 1)
+            bias = bias + layer.factorized_linear.bias.repeat(layer.count)
+        weight = weight.view(layer.count, layer.out_features, layer.in_features)
+        bias = bias.view(layer.count, layer.out_features)
         return weight.contiguous(), bias.contiguous()
 
     def _all_experts_forward(
@@ -199,4 +202,5 @@ class MoELayerStacks(nn.Module):
 
     @torch.no_grad()
     def coalesce_layer_stacks_inplace(self) -> None:
-        pass  # No factorized weights to coalesce
+        if hasattr(self.l1, "coalesce_weights"):
+            self.l1.coalesce_weights()

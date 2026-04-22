@@ -34,7 +34,7 @@ from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.model.modules import MoELayerStacks
 
 # Format version (matches rgodha24/Stockfish fork — single version for all models).
-VERSION = 0x7AF32F20
+VERSION = 0x7AF32F21
 
 # Router<64, 8>::get_hash_value(0) = 0xABCD1234 + 8 = 0xABCD123C.
 # Always included in the header hash (C++ Network::hash XORs it in).
