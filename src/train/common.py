@@ -7,11 +7,14 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
 from src import ranger22
 from src.data import Batch, iter_device_batches
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.train.config import BaseTrainingConfig
+from src.train.distributed import DistributedRuntime, init_training_runtime
 from src.train.log import TrainingLogger
 
 LoaderMetricsFn = Callable[[], dict[str, float | int]]
@@ -22,6 +25,9 @@ class TrainBatchSource:
     batches: Iterable[Batch]
     metrics: LoaderMetricsFn
     close: Callable[[], None]
+
+
+TrainBatchSourceFactory = Callable[[DistributedRuntime, int], TrainBatchSource]
 
 
 def ensure_datasets_exist(paths: Iterable[str]) -> None:
@@ -103,6 +109,7 @@ def compute_loss(
 def build_training_state(
     args: BaseTrainingConfig,
     device: torch.device,
+    runtime: DistributedRuntime,
 ) -> tuple[
     NNUEModel,
     Any,
@@ -133,7 +140,7 @@ def build_training_state(
     )
     router_param_ids = {id(p) for p in router_params}
     main_params = [p for p in model.parameters() if id(p) not in router_param_ids]
-    param_groups: list[dict[str, object]] = [{"params": main_params}]
+    param_groups: list[dict[str, Any]] = [{"params": main_params}]
     if router_params:
         param_groups.append(
             {"params": list(router_params), "lr": args.lr * args.router_lr_multiplier}
@@ -167,10 +174,18 @@ def build_training_state(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
+            emit_log=runtime.is_main_process,
         )
 
     setattr(torch._dynamo.config, "cache_size_limit", 32)
-    compiled_model = torch.compile(model, backend=args.compile_backend)
+    train_model: torch.nn.Module = model
+    if runtime.is_distributed:
+        train_model = DistributedDataParallel(
+            model,
+            device_ids=[runtime.local_rank],
+            output_device=runtime.local_rank,
+        )
+    compiled_model = torch.compile(train_model, backend=args.compile_backend)
     return model, compiled_model, optimizer, scheduler, start_epoch, global_step
 
 
@@ -180,6 +195,7 @@ def restore_training_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
+    emit_log: bool = True,
 ) -> tuple[int, int]:
     if not os.path.exists(path):
         raise FileNotFoundError(path)
@@ -191,42 +207,78 @@ def restore_training_checkpoint(
 
     start_epoch = int(checkpoint.get("epoch", -1)) + 1
     global_step = int(checkpoint.get("global_step", 0))
-    print(
-        f"resumed checkpoint {path} at epoch={start_epoch:03d} global_step={global_step}",
-        flush=True,
-    )
+    if emit_log:
+        print(
+            f"resumed checkpoint {path} at epoch={start_epoch:03d} global_step={global_step}",
+            flush=True,
+        )
     return start_epoch, global_step
 
 
 def run_training(
     args: BaseTrainingConfig,
-    source: TrainBatchSource,
+    source_factory: TrainBatchSourceFactory,
+    *,
+    allow_distributed: bool,
 ) -> None:
     ensure_datasets_exist(args.datasets)
     os.makedirs(args.default_root_dir, exist_ok=True)
-    set_seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
-        raise RuntimeError("CUDA is required for this training path")
-
-    model, compiled_model, optimizer, scheduler, start_epoch, global_step = (
-        build_training_state(args, device)
-    )
-
-    logger = TrainingLogger(args)
-
-    num_batches = num_batches_for_size(args.epoch_size, args.batch_size)
-    final_epoch = start_epoch - 1
-    device_batches = iter_device_batches(
-        source.batches,
-        device,
-        queue_size_limit=args.data_loader_queue_size,
-    )
+    runtime = init_training_runtime(args, allow_distributed=allow_distributed)
+    source: TrainBatchSource | None = None
+    logger: TrainingLogger | None = None
+    device_batches = None
 
     try:
+        set_seed(args.seed)
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for this training path")
+        local_batch_size = args.batch_size
+        if runtime.is_distributed:
+            if args.batch_size % runtime.world_size != 0:
+                raise ValueError(
+                    "For DDP, `batch_size` is the global batch size and must be divisible by WORLD_SIZE. "
+                    f"Got batch_size={args.batch_size}, world_size={runtime.world_size}."
+                )
+            local_batch_size = args.batch_size // runtime.world_size
+        device_index = (
+            runtime.local_rank
+            if runtime.is_distributed
+            else torch.cuda.current_device()
+        )
+        device = torch.device("cuda", device_index)
+        if runtime.is_main_process:
+            print(
+                "starting training: world_size={} local_batch_size={} global_batch_size={} device={}".format(
+                    runtime.world_size,
+                    local_batch_size,
+                    args.batch_size,
+                    device,
+                ),
+                flush=True,
+            )
+
+        source = source_factory(runtime, local_batch_size)
+        model, compiled_model, optimizer, scheduler, start_epoch, global_step = (
+            build_training_state(args, device, runtime)
+        )
+
+        logger = TrainingLogger(args, runtime, local_batch_size)
+
+        num_batches = num_batches_for_size(
+            args.epoch_size,
+            args.batch_size,
+        )
+        final_epoch = start_epoch - 1
+        device_batches = iter_device_batches(
+            source.batches,
+            device,
+            queue_size_limit=args.data_loader_queue_size,
+        )
+
         for epoch in range(start_epoch, args.max_epochs):
-            model.train()
+            compiled_model.train()
             model.set_epoch(epoch)
             epoch_loss_sum = torch.zeros((), device=device)
             epoch_start = time.time()
@@ -279,8 +331,19 @@ def run_training(
             if processed_batches == 0:
                 raise RuntimeError("training loader produced no batches")
             elapsed = max(time.time() - epoch_start, 1e-9)
+            elapsed_tensor = torch.tensor(elapsed, device=device, dtype=torch.float64)
+            runtime.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX)
+            elapsed = float(elapsed_tensor.item())
+            runtime.all_reduce(epoch_loss_sum)
+            reduced_batches_tensor = torch.tensor(
+                processed_batches,
+                device=device,
+                dtype=torch.int64,
+            )
+            runtime.all_reduce(reduced_batches_tensor)
+            reduced_batches = int(reduced_batches_tensor.item())
             lr = optimizer.param_groups[0]["lr"]
-            epoch_loss = float(epoch_loss_sum.item()) / processed_batches
+            epoch_loss = float(epoch_loss_sum.item()) / reduced_batches
             final_epoch = epoch
             logger.finish_epoch(
                 epoch=epoch,
@@ -288,6 +351,7 @@ def run_training(
                 lr=lr,
                 elapsed=elapsed,
                 processed_batches=processed_batches,
+                reduced_batches=reduced_batches,
                 global_step=global_step,
                 loader_end=source.metrics() if source.metrics is not None else None,
             )
@@ -308,6 +372,7 @@ def run_training(
                         args=args,
                     ),
                 )
+                runtime.barrier()
 
         logger.save_final_checkpoint(
             save_fn=lambda path: save_training_checkpoint(
@@ -320,12 +385,15 @@ def run_training(
                 args=args,
             )
         )
+        runtime.barrier()
     finally:
         try:
-            if source.close is not None:
+            if source is not None and source.close is not None:
                 source.close()
         finally:
             close_batches = getattr(device_batches, "close", None)
             if callable(close_batches):
                 close_batches()
-            logger.finish()
+            if logger is not None:
+                logger.finish()
+            runtime.destroy()

@@ -44,10 +44,24 @@ nix develop -c uv run --no-sync python -m src.train.singlenode \
       --l1 1040 --l2 31 --l3 32 \
       --lr 4.375e-4 --gamma 0.995 \
       --start-lambda 1.0 --end-lambda 0.75 \
-      --random-fen-skipping 10 --early-fen-skipping 12 \
+      --early-fen-skipping 12 \
       --w1 3.3553547771220007 --w2 0.7006821612968052 \
       --lambda 1.0 \
       --stacks moe --num-experts 8 --router-features 64 \
-      --aux-loss-alpha 0.0005 --z-loss-alpha 0.0 \
-      --gumbel-tau 0.2
+       --aux-loss-alpha 0.0005 --z-loss-alpha 0.0 \
+       --gumbel-tau 0.2
 ```
+
+single-node multi-GPU DDP (`--batch-size` is the global batch size and is split evenly across ranks):
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 -m src.train.singlenode \
+      /tmp/nnue-data/*.binpack \
+      /mnt/external/nnue-data/*.binpack \
+      --max-epochs 100 --batch-size 65536 \
+      --features Full_Threats+HalfKAv2_hm^
+```
+
+On 4 GPUs, `--batch-size 65536` means `16384` samples per GPU.
+
+`src.train.multinode` is still the Ray-fed single-trainer-process path; for 1 VM / 4xH100 training use `src.train.singlenode` under `torchrun`.

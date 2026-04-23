@@ -5,6 +5,8 @@
 - `python -m src.distributed.smoke` for multinode throughput smoke tests
 - `python -m src.train.multinode` for real training on the same data path
 
+For single-node multi-GPU training on one host, use `torchrun -m src.train.singlenode` instead. The Ray-backed `src.train.multinode` path still assumes one trainer process.
+
 The design keeps full Rust decode+encode on feeder nodes, transfers already-encoded
 batches over Ray, and reuses the same direct `BatchStream` path as single-node
 training.

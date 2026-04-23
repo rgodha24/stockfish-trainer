@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import wandb
 
+from src.train.distributed import DistributedRuntime
 from src.train.config import BaseTrainingConfig
 
 
@@ -168,6 +169,21 @@ class RoutingMetricsAccumulator:
         self.fraction_routed_sum.add_(fraction_routed.detach().to(dtype=torch.float32))
         self.avg_gate_prob_sum.add_(avg_gate_prob.detach().to(dtype=torch.float32))
 
+    def synchronize(self, runtime: DistributedRuntime) -> None:
+        if not runtime.is_distributed:
+            return
+        runtime.all_reduce(self.router_loss_sum)
+        runtime.all_reduce(self.aux_loss_sum)
+        runtime.all_reduce(self.z_loss_sum)
+        runtime.all_reduce(self.entropy_sum)
+        runtime.all_reduce(self.top1_prob_sum)
+        runtime.all_reduce(self.target_prob_sum)
+        runtime.all_reduce(self.bucket_agreement_sum)
+        runtime.all_reduce(self.teacher_ce_sum)
+        runtime.all_reduce(self.teacher_alpha_sum)
+        runtime.all_reduce(self.fraction_routed_sum)
+        runtime.all_reduce(self.avg_gate_prob_sum)
+
     def finalize(self, processed_batches: int) -> tuple[dict[str, Any], str]:
         denom = max(processed_batches, 1)
         avg_fraction_routed = (self.fraction_routed_sum / denom).detach().cpu()
@@ -262,15 +278,28 @@ class RoutingMetricsAccumulator:
 
 
 class TrainingLogger:
-    def __init__(self, args: BaseTrainingConfig):
+    def __init__(
+        self,
+        args: BaseTrainingConfig,
+        runtime: DistributedRuntime,
+        local_batch_size: int,
+    ):
         self.args = args
-        self.run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config=asdict(args),
-        )
-        self.checkpoint_dir = os.path.join(self.run.dir, "checkpoints")
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.runtime = runtime
+        self.local_batch_size = local_batch_size
+        self.run = None
+        self.checkpoint_dir: str | None = None
+        if runtime.is_main_process:
+            self.run = wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                config={
+                    **asdict(args),
+                    "world_size": runtime.world_size,
+                },
+            )
+            self.checkpoint_dir = os.path.join(self.run.dir, "checkpoints")
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
         self._loader_start: dict[str, float | int] | None = None
         self._routing_acc: RoutingMetricsAccumulator | None = None
 
@@ -297,6 +326,8 @@ class TrainingLogger:
         num_batches: int,
         loss: torch.Tensor,
     ) -> None:
+        if not self.runtime.is_main_process:
+            return
         if batch_idx % max(1, num_batches // 4) != 0 and batch_idx != num_batches - 1:
             return
         print(
@@ -312,29 +343,39 @@ class TrainingLogger:
         lr: float,
         elapsed: float,
         processed_batches: int,
+        reduced_batches: int,
         global_step: int,
         loader_end: dict[str, float | int] | None,
     ) -> None:
+        if self._routing_acc is not None:
+            self._routing_acc.synchronize(self.runtime)
+        if not self.runtime.is_main_process:
+            return
+
+        global_batch_size = self.args.batch_size
         metrics: dict[str, Any] = {
             "train/epoch": epoch,
             "train/loss_epoch": epoch_loss,
             "train/lr": lr,
             "train/epoch_time_sec": elapsed,
             "train/it_per_sec": processed_batches / elapsed,
-            "train/positions_per_sec": (processed_batches * self.args.batch_size)
+            "train/positions_per_sec": (processed_batches * global_batch_size)
             / elapsed,
+            "train/world_size": self.runtime.world_size,
+            "train/local_batch_size": self.local_batch_size,
+            "train/global_batch_size": global_batch_size,
         }
         metrics.update(_build_loader_metrics(self._loader_start, loader_end, elapsed))
 
         routing_summary = None
         if self._routing_acc is not None:
             routing_metrics, routing_summary = self._routing_acc.finalize(
-                processed_batches
+                reduced_batches
             )
             metrics.update(routing_metrics)
 
         print(
-            f"epoch={epoch:03d} done loss={epoch_loss:.6f} lr={lr:.8g} time={elapsed:.1f}s it/s={processed_batches / elapsed:.1f} pos/s={(processed_batches * self.args.batch_size) / elapsed:.0f}",
+            f"epoch={epoch:03d} done loss={epoch_loss:.6f} lr={lr:.8g} time={elapsed:.1f}s it/s={processed_batches / elapsed:.1f} pos/s={(processed_batches * global_batch_size) / elapsed:.0f}",
             flush=True,
         )
         if routing_summary is not None:
@@ -348,6 +389,8 @@ class TrainingLogger:
         epoch: int,
         save_fn,
     ) -> None:
+        if not self.runtime.is_main_process or self.checkpoint_dir is None:
+            return
         epoch_path = os.path.join(self.checkpoint_dir, f"epoch_{epoch:04d}.pt")
         last_path = os.path.join(self.checkpoint_dir, "last.pt")
         save_fn(epoch_path)
@@ -355,9 +398,12 @@ class TrainingLogger:
         print(f"saved checkpoints {epoch_path} -> {last_path}", flush=True)
 
     def save_final_checkpoint(self, save_fn) -> None:
+        if not self.runtime.is_main_process or self.checkpoint_dir is None:
+            return
         final_path = os.path.join(self.checkpoint_dir, "final.pt")
         save_fn(final_path)
         print(f"saved final checkpoint {final_path}", flush=True)
 
     def finish(self) -> None:
-        self.run.finish()
+        if self.run is not None:
+            self.run.finish()
