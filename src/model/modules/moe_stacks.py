@@ -180,12 +180,6 @@ class MoELayerStacks(nn.Module):
             # but router gets gradients through gate_prob.
             gate_prob = gate_probs.gather(1, expert_indices.unsqueeze(1))
             l3x_ = l3x_ * (1.0 + gate_prob - gate_prob.detach())
-        # Expert diversity metric (computed on a small subset for efficiency)
-        with torch.no_grad():
-            sample = min(256, x.shape[0])
-            sample_idx = torch.randperm(x.shape[0])[:sample]
-            sample_out = self._all_experts_forward(x[sample_idx])
-            expert_output_std = sample_out.std(dim=1).mean()
         return l3x_, {
             "routing/router_loss": router_loss,
             "routing/aux_loss": aux_loss,
@@ -198,7 +192,6 @@ class MoELayerStacks(nn.Module):
             "routing/teacher_alpha": self._teacher_alpha.to(dtype=gate_probs.dtype),
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
-            "routing/expert_output_std": expert_output_std,
         }
 
     @torch.no_grad()

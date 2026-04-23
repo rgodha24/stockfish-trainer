@@ -95,14 +95,11 @@ class FactorizedStackedLinear(StackedLinear):
             self.factorized_linear.bias.zero_()
 
     def forward(self, x: torch.Tensor, ls_indices: torch.Tensor) -> torch.Tensor:
-        merged_weight = self.linear.weight + self.factorized_linear.weight.repeat(
-            self.count, 1
-        )
-        merged_bias = self.linear.bias + self.factorized_linear.bias.repeat(self.count)
+        stacked_output = self.linear(x)
+        selected_output = self.select_output(stacked_output, ls_indices)
+        shared_output = self.factorized_linear(x)
 
-        stacked_output = F.linear(x, merged_weight, merged_bias)
-
-        return self.select_output(stacked_output, ls_indices)
+        return selected_output + shared_output
 
     @torch.no_grad()
     def at_index(self, index: int) -> nn.Linear:
