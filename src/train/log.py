@@ -83,6 +83,10 @@ class RoutingMetricsAccumulator:
     z_loss_sum: torch.Tensor
     entropy_sum: torch.Tensor
     top1_prob_sum: torch.Tensor
+    target_prob_sum: torch.Tensor
+    bucket_agreement_sum: torch.Tensor
+    teacher_ce_sum: torch.Tensor
+    teacher_alpha_sum: torch.Tensor
     fraction_routed_sum: torch.Tensor
     avg_gate_prob_sum: torch.Tensor
     expert_output_std_sum: torch.Tensor
@@ -102,6 +106,10 @@ class RoutingMetricsAccumulator:
             z_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
             entropy_sum=torch.zeros((), device=device, dtype=torch.float32),
             top1_prob_sum=torch.zeros((), device=device, dtype=torch.float32),
+            target_prob_sum=torch.zeros((), device=device, dtype=torch.float32),
+            bucket_agreement_sum=torch.zeros((), device=device, dtype=torch.float32),
+            teacher_ce_sum=torch.zeros((), device=device, dtype=torch.float32),
+            teacher_alpha_sum=torch.zeros((), device=device, dtype=torch.float32),
             fraction_routed_sum=torch.zeros_like(
                 fraction_routed.detach(), dtype=torch.float32
             ),
@@ -117,6 +125,10 @@ class RoutingMetricsAccumulator:
         z_loss = log_dict.get("routing/z_loss")
         fraction_routed = log_dict.get("routing/fraction_routed")
         avg_gate_prob = log_dict.get("routing/avg_gate_prob")
+        target_prob = log_dict.get("routing/target_prob")
+        bucket_agreement = log_dict.get("routing/bucket_agreement")
+        teacher_ce = log_dict.get("routing/teacher_ce")
+        teacher_alpha = log_dict.get("routing/teacher_alpha")
         entropy = log_dict.get("routing/entropy")
         top1_prob = log_dict.get("routing/top1_prob")
         if (
@@ -125,6 +137,10 @@ class RoutingMetricsAccumulator:
             or z_loss is None
             or fraction_routed is None
             or avg_gate_prob is None
+            or target_prob is None
+            or bucket_agreement is None
+            or teacher_ce is None
+            or teacher_alpha is None
             or entropy is None
             or top1_prob is None
         ):
@@ -135,6 +151,12 @@ class RoutingMetricsAccumulator:
         self.z_loss_sum.add_(z_loss.detach().to(dtype=torch.float32))
         self.entropy_sum.add_(entropy.detach().to(dtype=torch.float32))
         self.top1_prob_sum.add_(top1_prob.detach().to(dtype=torch.float32))
+        self.target_prob_sum.add_(target_prob.detach().to(dtype=torch.float32))
+        self.bucket_agreement_sum.add_(
+            bucket_agreement.detach().to(dtype=torch.float32)
+        )
+        self.teacher_ce_sum.add_(teacher_ce.detach().to(dtype=torch.float32))
+        self.teacher_alpha_sum.add_(teacher_alpha.detach().to(dtype=torch.float32))
         self.fraction_routed_sum.add_(fraction_routed.detach().to(dtype=torch.float32))
         self.avg_gate_prob_sum.add_(avg_gate_prob.detach().to(dtype=torch.float32))
         expert_output_std = log_dict.get("routing/expert_output_std")
@@ -169,6 +191,18 @@ class RoutingMetricsAccumulator:
             "routing/top1_prob_epoch": float(
                 (self.top1_prob_sum / denom).detach().cpu().item()
             ),
+            "routing/target_prob_epoch": float(
+                (self.target_prob_sum / denom).detach().cpu().item()
+            ),
+            "routing/bucket_agreement_epoch": float(
+                (self.bucket_agreement_sum / denom).detach().cpu().item()
+            ),
+            "routing/teacher_ce_epoch": float(
+                (self.teacher_ce_sum / denom).detach().cpu().item()
+            ),
+            "routing/teacher_alpha_epoch": float(
+                (self.teacher_alpha_sum / denom).detach().cpu().item()
+            ),
             "routing/load_max_epoch": float(avg_fraction_routed.max().item()),
             "routing/load_min_epoch": float(avg_fraction_routed.min().item()),
             "routing/load_std_epoch": load_std,
@@ -198,12 +232,18 @@ class RoutingMetricsAccumulator:
 
         summary = (
             "routing aux={aux:.6f} z={z:.6f} entropy={entropy:.3f} top1={top1:.3f} "
+            "agree={agree:.3f} target_prob={target_prob:.3f} teacher_ce={teacher_ce:.3f} "
+            "teacher_alpha={teacher_alpha:.3f} "
             "load[min,max]=[{load_min:.4f},{load_max:.4f}] used={used}/{total}"
         ).format(
             aux=metrics["routing/aux_loss_epoch"],
             z=metrics["routing/z_loss_epoch"],
             entropy=metrics["routing/entropy_epoch"],
             top1=metrics["routing/top1_prob_epoch"],
+            agree=metrics["routing/bucket_agreement_epoch"],
+            target_prob=metrics["routing/target_prob_epoch"],
+            teacher_ce=metrics["routing/teacher_ce_epoch"],
+            teacher_alpha=metrics["routing/teacher_alpha_epoch"],
             load_min=metrics["routing/load_min_epoch"],
             load_max=metrics["routing/load_max_epoch"],
             used=experts_used,

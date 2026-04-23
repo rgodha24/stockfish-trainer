@@ -24,7 +24,9 @@ class BaseTrainingConfig:
     num_experts: int = 8
     aux_loss_alpha: float = 0.001
     z_loss_alpha: float = 0.0
-    router_lr_multiplier: float = 0.1
+    router_lr_multiplier: float = 1.0
+    router_teacher_alpha: float = 0.0
+    router_teacher_anneal_epochs: int = 0
 
     lr: float = 8.75e-4
     gamma: float = 0.992
@@ -86,6 +88,10 @@ class BaseTrainingConfig:
             raise ValueError("`aux_loss_alpha` must be non-negative.")
         if self.z_loss_alpha < 0.0:
             raise ValueError("`z_loss_alpha` must be non-negative.")
+        if self.router_teacher_alpha < 0.0:
+            raise ValueError("`router_teacher_alpha` must be non-negative.")
+        if self.router_teacher_anneal_epochs < 0:
+            raise ValueError("`router_teacher_anneal_epochs` must be non-negative.")
 
     def loader_skip_config(self) -> DataloaderSkipConfig:
         return DataloaderSkipConfig(

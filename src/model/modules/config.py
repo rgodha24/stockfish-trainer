@@ -23,6 +23,10 @@ class LayerStacksConfig:
     """Switch-style load-balancing coefficient for MoE routing"""
     z_loss_alpha: float = 0.0
     """router z-loss coefficient for MoE routing"""
+    router_teacher_alpha: float = 0.0
+    """Weight of explicit CE loss toward the piece-count bucket during MoE warm-start."""
+    router_teacher_anneal_epochs: int = 0
+    """Linearly decay router_teacher_alpha to zero over this many epochs (0 keeps it constant)."""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:
@@ -35,3 +39,7 @@ class LayerStacksConfig:
             raise ValueError("`aux_loss_alpha` must be non-negative.")
         if self.z_loss_alpha < 0.0:
             raise ValueError("`z_loss_alpha` must be non-negative.")
+        if self.router_teacher_alpha < 0.0:
+            raise ValueError("`router_teacher_alpha` must be non-negative.")
+        if self.router_teacher_anneal_epochs < 0:
+            raise ValueError("`router_teacher_anneal_epochs` must be non-negative.")

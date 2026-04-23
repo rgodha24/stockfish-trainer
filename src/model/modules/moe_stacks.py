@@ -23,7 +23,9 @@ class MoELayerStacks(nn.Module):
         self.L3 = config.L3
         self.aux_loss_alpha = config.aux_loss_alpha
         self.z_loss_alpha = config.z_loss_alpha
-        self.register_buffer("_curriculum_alpha", torch.tensor(0.0))
+        self.router_teacher_alpha = config.router_teacher_alpha
+        self.router_teacher_anneal_epochs = config.router_teacher_anneal_epochs
+        self.register_buffer("_teacher_alpha", torch.tensor(0.0))
 
         self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
         self._reset_router()
@@ -31,14 +33,18 @@ class MoELayerStacks(nn.Module):
         self.l1 = FactorizedStackedLinear(config.L1, self.L2 + 1, num_experts)
         self.l2 = StackedLinear(self.L2 * 2, self.L3, num_experts)
         self.output = StackedLinear(self.L3, 1, num_experts)
+        self._diversify_expert_inits()
 
         with torch.no_grad():
             self.output.linear.bias.zero_()
 
     def set_current_epoch(self, epoch: int) -> None:
-        """Set current epoch for curriculum scheduling."""
-        alpha = max(0.0, min(5.0 * math.exp(-(epoch - 15) / 10.0) - 0.02, 3.0))
-        self._curriculum_alpha.fill_(alpha)
+        """Set current epoch for teacher CE scheduling."""
+        teacher_alpha = self.router_teacher_alpha
+        if self.router_teacher_anneal_epochs > 0:
+            progress = min(epoch / self.router_teacher_anneal_epochs, 1.0)
+            teacher_alpha *= 1.0 - progress
+        self._teacher_alpha.fill_(teacher_alpha)
 
     @torch.no_grad()
     def _reset_router(self) -> None:
@@ -134,15 +140,14 @@ class MoELayerStacks(nn.Module):
         )
         gate_logits = self.router(router_input)
 
-        # Piece-count curriculum bias: always present, alpha decays 8 -> 0.
         assert _ls_indices is not None
-        bias = F.one_hot(_ls_indices, num_classes=self.num_experts).to(
-            gate_logits.dtype
-        )
-        gate_logits = gate_logits + bias * self._curriculum_alpha
-
         gate_probs = F.softmax(gate_logits, dim=-1)
         expert_indices = gate_logits.argmax(dim=-1)
+
+        # Teacher metrics (how well does the router match piece-count buckets?)
+        target_prob = gate_probs.gather(1, _ls_indices.unsqueeze(1)).mean()
+        bucket_agreement = (expert_indices == _ls_indices).to(gate_probs.dtype).mean()
+        teacher_ce = F.cross_entropy(gate_logits, _ls_indices)
 
         fraction_routed = torch.bincount(expert_indices, minlength=self.num_experts).to(
             gate_probs.dtype
@@ -159,6 +164,7 @@ class MoELayerStacks(nn.Module):
         if self.training:
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
+            router_loss = router_loss + self._teacher_alpha * teacher_ce
 
         # Hard argmax routing (matches inference; sparse kernel on CUDA)
         if x.is_cuda and x.dtype == torch.float32:
@@ -186,11 +192,13 @@ class MoELayerStacks(nn.Module):
             "routing/z_loss": z_loss,
             "routing/fraction_routed": fraction_routed,
             "routing/avg_gate_prob": avg_gate_prob,
+            "routing/target_prob": target_prob,
+            "routing/bucket_agreement": bucket_agreement,
+            "routing/teacher_ce": teacher_ce,
+            "routing/teacher_alpha": self._teacher_alpha.to(dtype=gate_probs.dtype),
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
-            "routing/tau": x.new_tensor(0.0),
             "routing/expert_output_std": expert_output_std,
-            "routing/curriculum_alpha": x.new_tensor(self._curriculum_alpha),
         }
 
     @torch.no_grad()

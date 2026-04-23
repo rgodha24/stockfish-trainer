@@ -119,6 +119,8 @@ def build_training_state(
         num_experts=args.num_experts,
         aux_loss_alpha=args.aux_loss_alpha,
         z_loss_alpha=args.z_loss_alpha,
+        router_teacher_alpha=args.router_teacher_alpha,
+        router_teacher_anneal_epochs=args.router_teacher_anneal_epochs,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
