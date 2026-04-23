@@ -5,7 +5,7 @@ Supports standard LayerStacks models, shared/no-stack models, and MoE
 
 Binary layouts (match the build-time stack modes in `stockfish/src`):
     layer: [header] | [FT] | [8 FC buckets]
-    none:  [header] | [FT with 1 PSQT bucket] | [1 FC bucket]
+    none:  [header] | [FT] | [1 FC bucket]
     moe:   [header] | [FT] | [router] | [8 expert buckets]
 
 Usage:
@@ -129,7 +129,7 @@ class NNUEWriter:
 
     The exact layout depends on the selected stack mode:
     - `layer`: standard Stockfish 8-bucket net, no router.
-    - `none`: single FC bucket and single PSQT bucket on disk.
+    - `none`: single FC bucket on disk, standard PSQT buckets.
     - `moe`: router section plus 8 expert buckets.
     """
 
@@ -214,9 +214,6 @@ class NNUEWriter:
         if self.pad_amount > 0:
             bias = torch.nn.functional.pad(bias, (0, self.pad_amount))
             weight = torch.nn.functional.pad(weight, (0, self.pad_amount))
-
-        if self.uses_fixed_bucket:
-            psqt_weight = psqt_weight[:, :1]
 
         self._write_tensor(bias.flatten().numpy(), ft_compression)
         offset = 0
