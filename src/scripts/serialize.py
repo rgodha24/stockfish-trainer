@@ -1,15 +1,12 @@
 """Export a trained model checkpoint to .nnue format for Stockfish.
 
 Supports standard LayerStacks models, shared/no-stack models, and MoE
-(Mixture of Experts) models.  All models include a router section between
-the feature transformer and the per-bucket FC layers (C++ always reads it).
-MoE models write quantized router weights; non-MoE models write zeros.
+(Mixture of Experts) models.
 
-Binary layout (matches rgodha24/Stockfish @ fd1b945f):
-    [header]  VERSION(4) | hash(4) | desc_len(4) | desc
-    [FT]      ft_hash(4) | bias_i16 | per-feature weights | psqt_weights
-    [router]  bias_i32[8] | weight_i8[8 * 64]
-    [buckets] for each bucket: fc_hash(4) | l1 | l2 | output
+Binary layouts (match the build-time stack modes in `stockfish/src`):
+    layer: [header] | [FT] | [8 FC buckets]
+    none:  [header] | [FT with 1 PSQT bucket] | [1 FC bucket]
+    moe:   [header] | [FT] | [router] | [8 expert buckets]
 
 Usage:
     python -m src.scripts.serialize <source.pt> <target.nnue> [options]
@@ -33,12 +30,21 @@ from tyro.conf import OmitArgPrefixes, Positional
 from src.model import ModelConfig, NNUEModel, QuantizationConfig
 from src.model.modules import MoELayerStacks
 
-# Format version (matches rgodha24/Stockfish fork — single version for all models).
-VERSION = 0x7AF32F21
+StackMode = Literal["layer", "none", "moe"]
+
+# Format version shared by all build-time stack modes.
+VERSION = 0x7AF32F20
 
 # Router<64, 8>::get_hash_value(0) = 0xABCD1234 + 8 = 0xABCD123C.
-# Always included in the header hash (C++ Network::hash XORs it in).
+# Only included in the header hash for MoE exports.
 ROUTER_HASH = 0xABCD123C
+
+# Must match StackModeHashSalt in stockfish/src/nnue/nnue_common.h.
+STACK_MODE_HASH_SALTS: dict[StackMode, int] = {
+    "layer": 0,
+    "none": 0x61E90A17,
+    "moe": 0,
+}
 
 DEFAULT_DESCRIPTION = (
     "Network trained with the stockfish-trainer "
@@ -121,12 +127,10 @@ class NNUEWriter:
 
     All multi-byte integers are little-endian.
 
-    Binary layout (matches rgodha24/Stockfish @ fd1b945f)
-    -----------------------------------------------------
-    [header]  VERSION(4) | hash(4) | desc_len(4) | desc
-    [FT]      ft_hash(4) | bias_i16 | per-feature weights | psqt_weights
-    [router]  bias_i32[8] | weight_i8[8 * 64]   (always present)
-    [buckets] for each bucket: fc_hash(4) | l1 | l2 | output
+    The exact layout depends on the selected stack mode:
+    - `layer`: standard Stockfish 8-bucket net, no router.
+    - `none`: single FC bucket and single PSQT bucket on disk.
+    - `moe`: router section plus 8 expert buckets.
     """
 
     def __init__(
@@ -135,11 +139,16 @@ class NNUEWriter:
         description: str | None = None,
         ft_compression: Literal["none", "leb128"] = "leb128",
         pad_l1: int | None = None,
+        stack_mode: StackMode | None = None,
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
 
         self.buf = bytearray()
+        self.stack_mode = _resolve_stack_mode(model, stack_mode)
+        self.uses_moe_router = self.stack_mode == "moe"
+        self.uses_fixed_bucket = self.stack_mode == "none"
+        self.stack_mode_hash_salt = STACK_MODE_HASH_SALTS[self.stack_mode]
 
         # Effective L1 after optional padding (for SIMD tiling tests)
         self.effective_l1 = pad_l1 if pad_l1 is not None else model.L1
@@ -150,9 +159,18 @@ class NNUEWriter:
         fc_hash = _fc_hash(model)
 
         # --- Header ---
-        # C++ Network::hash = FT_hash ^ Arch_hash ^ Router_hash
+        # C++ Network::hash = FT_hash ^ Arch_hash ^ StackModeHashSalt ^ Router_hash(moe-only)
+        header_hash = (
+            fc_hash
+            ^ model.feature_hash
+            ^ (self.effective_l1 * 2)
+            ^ self.stack_mode_hash_salt
+        )
+        if self.uses_moe_router:
+            header_hash ^= ROUTER_HASH
+
         self.int32(VERSION)
-        self.int32(fc_hash ^ model.feature_hash ^ (self.effective_l1 * 2) ^ ROUTER_HASH)
+        self.int32(header_hash)
         desc_bytes = description.encode("utf-8")
         self.int32(len(desc_bytes))
         self.buf.extend(desc_bytes)
@@ -161,11 +179,16 @@ class NNUEWriter:
         self.int32(model.feature_hash ^ (self.effective_l1 * 2))
         self._write_feature_transformer(model, ft_compression)
 
-        # --- Router (always present; zeros for non-MoE) ---
-        self._write_router(model)
+        # --- Router (MoE only) ---
+        if self.uses_moe_router:
+            self._write_router(model)
 
         # --- Per-bucket / per-expert FC layers ---
-        for l1, l2, output in model.layer_stacks.get_coalesced_layer_stacks():
+        for index, (l1, l2, output) in enumerate(
+            model.layer_stacks.get_coalesced_layer_stacks()
+        ):
+            if self.uses_fixed_bucket and index > 0:
+                break
             self.int32(fc_hash)
             self._write_fc_layer(model, l1, is_output=False)
             self._write_fc_layer(model, l2, is_output=False)
@@ -192,6 +215,9 @@ class NNUEWriter:
             bias = torch.nn.functional.pad(bias, (0, self.pad_amount))
             weight = torch.nn.functional.pad(weight, (0, self.pad_amount))
 
+        if self.uses_fixed_bucket:
+            psqt_weight = psqt_weight[:, :1]
+
         self._write_tensor(bias.flatten().numpy(), ft_compression)
         offset = 0
         for f in layer.features:
@@ -207,26 +233,19 @@ class NNUEWriter:
     # -- Router -----------------------------------------------------------
 
     def _write_router(self, model: NNUEModel) -> None:
-        """Write Router<64, 8> data: int32 biases[8] then int8 weights[8*64].
-
-        C++ router.read_parameters() reads biases then weights with no
-        framing (no hash prefix, no magic marker, no metadata).
-        For non-MoE models we write zeros so the C++ reader stays happy.
-        """
+        """Write Router<64, 8> data: int32 biases[8] then int8 weights[8*64]."""
         num_experts = 8
         router_input_dim = 64  # Router<64, 8>
 
         stacks = model.layer_stacks
-        if isinstance(stacks, MoELayerStacks):
-            bias, weight = model.quantization.quantize_fc_layer(
-                stacks.router.bias.data,
-                stacks.router.weight.data,
-                output_layer=False,
-            )
-        else:
-            # Non-MoE: write zeros (C++ still reads the router section)
-            bias = torch.zeros(num_experts, dtype=torch.int32)
-            weight = torch.zeros(num_experts, router_input_dim, dtype=torch.int8)
+        if not isinstance(stacks, MoELayerStacks):
+            raise ValueError("Router export requested for a non-MoE model")
+
+        bias, weight = model.quantization.quantize_fc_layer(
+            stacks.router.bias.data,
+            stacks.router.weight.data,
+            output_layer=False,
+        )
 
         self.buf.extend(bias.flatten().numpy().tobytes())
         self.buf.extend(weight.flatten().numpy().tobytes())
@@ -312,6 +331,25 @@ def _load_model(path: str) -> NNUEModel:
     )
 
 
+def _infer_stack_mode(model: NNUEModel) -> StackMode:
+    if isinstance(model.layer_stacks, MoELayerStacks):
+        return "moe"
+    if getattr(model, "stacks", "layer") == "none":
+        return "none"
+    return "layer"
+
+
+def _resolve_stack_mode(model: NNUEModel, requested: StackMode | None) -> StackMode:
+    inferred = _infer_stack_mode(model)
+    if requested is None:
+        return inferred
+    if inferred == "moe" and requested != "moe":
+        raise ValueError("MoE checkpoints can only be exported with stack_mode='moe'")
+    if inferred != "moe" and requested == "moe":
+        raise ValueError("Only MoE checkpoints can be exported with stack_mode='moe'")
+    return requested
+
+
 def _describe_model_for_export(model: NNUEModel) -> str:
     if isinstance(model.layer_stacks, MoELayerStacks):
         stacks = model.layer_stacks
@@ -346,6 +384,9 @@ class SerializeConfig:
     pad_l1: Optional[int] = None
     """Pad feature transformer from model's L1 to this value (zero-fill).
     Useful for testing SIMD tiling effects without retraining."""
+
+    stack_mode: Optional[StackMode] = None
+    """Target Stockfish stack mode. Defaults to the model's configured stack type."""
 
 
 @dataclass(frozen=True)
@@ -386,6 +427,7 @@ def main() -> None:
             description=cfg.description,
             ft_compression=cfg.ft_compression,
             pad_l1=cfg.pad_l1,
+            stack_mode=cfg.stack_mode,
         )
         buf = bytes(writer.buf)
 
