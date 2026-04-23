@@ -223,21 +223,13 @@ impl PipelineConfig {
         Ok(())
     }
 
-    fn skip_heavy(&self) -> bool {
-        self.skip_config.filtered
-            || self.skip_config.wld_filtered
-            || self.skip_config.random_fen_skipping > 0
-            || self.skip_config.early_fen_skipping >= 0
-            || self.skip_config.simple_eval_skipping > 0
-    }
-
     pub fn thread_counts(&self, task_count: usize) -> (usize, usize) {
-        let (mut decode, mut encode) = default_thread_counts(
-            self.total_threads,
-            self.files.len(),
-            task_count,
-            self.skip_heavy(),
-        );
+        // Default split: ~5/8 decode, ~3/8 encode (empirically tuned; encode is
+        // much heavier per-thread than decode for this feature set).
+        let total = self.total_threads;
+        let mut decode = ((total * 5) / 8).max(1);
+        let mut encode = total.saturating_sub(decode).max(1);
+
         if let Some(ovr) = self.thread_override {
             if let Some(d) = ovr.decode {
                 decode = d.max(1);
@@ -1320,32 +1312,6 @@ fn wld_params() -> &'static [WldParams] {
 
 fn random_seed() -> u64 {
     rand::thread_rng().gen()
-}
-
-pub fn default_thread_counts(
-    total_threads: usize,
-    _file_count: usize,
-    task_count: usize,
-    skip_heavy: bool,
-) -> (usize, usize) {
-    if total_threads <= 1 {
-        return (1, 1);
-    }
-
-    let available_tasks = task_count.max(1);
-
-    let (decode_threads, encode_threads) = if skip_heavy {
-        let decode_threads = ((total_threads * 3) / 4).max(1);
-        let encode_threads = total_threads.saturating_sub(decode_threads).max(1);
-        (decode_threads, encode_threads)
-    } else {
-        let decode_threads = (total_threads / 4).max(1).min(8);
-        let encode_threads = total_threads.saturating_sub(decode_threads).max(1);
-        (decode_threads, encode_threads)
-    };
-
-    let decode_threads = decode_threads.min(available_tasks).max(1);
-    (decode_threads, encode_threads)
 }
 
 pub fn default_batch_slab_count(total_threads: usize) -> usize {

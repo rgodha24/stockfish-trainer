@@ -42,8 +42,11 @@ def resolve_total_threads(loader_threads: int) -> int:
 
 
 def _auto_thread_counts(total_threads: int) -> tuple[int, int]:
-    encode_threads = max(1, (total_threads + 15) // 16)
-    decode_threads = max(1, total_threads - encode_threads)
+    # Empirically tuned on a 16-thread run: 10 decode / 6 encode (~5/8 decode).
+    # Encode is much heavier per-thread than decode; old formula (15d/1e) was
+    # severely starving the encoder.
+    decode_threads = max(1, (total_threads * 5) // 8)
+    encode_threads = max(1, total_threads - decode_threads)
     return decode_threads, encode_threads
 
 

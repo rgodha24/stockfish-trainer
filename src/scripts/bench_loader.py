@@ -24,7 +24,10 @@ class BenchLoaderConfig:
     batch_size: int = 65536
     features: str = "Full_Threats+HalfKAv2_hm^"
     loader_threads: int = -1
+    decode_threads: int = -1
+    encode_threads: int = -1
     shuffle_buffer_entries: int = 65536
+    pin_memory: bool = True
     filtered: bool = True
     wld_filtered: bool = True
     random_fen_skipping: int = 0
@@ -85,7 +88,7 @@ def resolve_binpack_paths(paths: Iterable[str]) -> tuple[list[str], list[str]]:
 
 
 def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> SparseBatchDataset:
-    return make_sparse_batch_dataset(
+    dataset = make_sparse_batch_dataset(
         feature_set=cfg.features,
         filenames=files,
         batch_size=cfg.batch_size,
@@ -93,8 +96,19 @@ def make_loader(cfg: BenchLoaderConfig, files: list[str]) -> SparseBatchDataset:
         loader_threads=cfg.loader_threads,
         config=cfg.loader_skip_config(),
         shuffle_buffer_entries=cfg.shuffle_buffer_entries,
-        pin_memory=False,
+        pin_memory=cfg.pin_memory,
     )
+    from src.data.loader import _auto_thread_counts, _default_slab_count
+
+    if cfg.decode_threads > 0 or cfg.encode_threads > 0:
+        total = dataset.total_threads
+        auto_dec, auto_enc = _auto_thread_counts(total)
+        enc = cfg.encode_threads if cfg.encode_threads > 0 else auto_enc
+        dec = cfg.decode_threads if cfg.decode_threads > 0 else (total - enc)
+        dataset.decode_threads = dec
+        dataset.encode_threads = enc
+        dataset.slab_count = _default_slab_count(enc)
+    return dataset
 
 
 def consume_batches(iterator: Iterator[Batch], batch_count: int) -> tuple[int, int]:

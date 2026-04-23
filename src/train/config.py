@@ -64,6 +64,7 @@ class BaseTrainingConfig:
     checkpoint_every_epochs: int = 10
     wandb_project: str = "stockfish-trainer"
     wandb_run_name: str | None = None
+    distributed_backend: Literal["nccl", "gloo"] = "nccl"
     compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
     resume_from_checkpoint: str | None = None
 
@@ -116,8 +117,8 @@ class SingleNodeTrainingConfig(BaseTrainingConfig):
 class MultiNodeTrainingConfig(BaseTrainingConfig):
     batch_size: int = 65536
     loader_threads: int = 16
-    encode_threads: int = 8
-    random_fen_skipping: int = 6
+    encode_threads: int = 6
+    random_fen_skipping: int = 0
     early_fen_skipping: int = 12
     ray_address: str | None = None
     ray_namespace: str = "stockfish-trainer"
