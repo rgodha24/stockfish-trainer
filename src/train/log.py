@@ -172,17 +172,40 @@ class RoutingMetricsAccumulator:
     def synchronize(self, runtime: DistributedRuntime) -> None:
         if not runtime.is_distributed:
             return
-        runtime.all_reduce(self.router_loss_sum)
-        runtime.all_reduce(self.aux_loss_sum)
-        runtime.all_reduce(self.z_loss_sum)
-        runtime.all_reduce(self.entropy_sum)
-        runtime.all_reduce(self.top1_prob_sum)
-        runtime.all_reduce(self.target_prob_sum)
-        runtime.all_reduce(self.bucket_agreement_sum)
-        runtime.all_reduce(self.teacher_ce_sum)
-        runtime.all_reduce(self.teacher_alpha_sum)
-        runtime.all_reduce(self.fraction_routed_sum)
-        runtime.all_reduce(self.avg_gate_prob_sum)
+        # Batch all routing metrics into a single all-reduce to minimize
+        # NCCL kernel launches (each launch has ~10-20us latency).
+        scalars = [
+            self.router_loss_sum,
+            self.aux_loss_sum,
+            self.load_floor_loss_sum,
+            self.load_cap_loss_sum,
+            self.z_loss_sum,
+            self.entropy_sum,
+            self.top1_prob_sum,
+            self.target_prob_sum,
+            self.bucket_agreement_sum,
+            self.teacher_ce_sum,
+            self.teacher_alpha_sum,
+        ]
+        flat = torch.cat(
+            [s.unsqueeze(0) for s in scalars]
+            + [self.fraction_routed_sum.flatten(), self.avg_gate_prob_sum.flatten()]
+        )
+        runtime.all_reduce(flat)
+        # Scatter reduced values back into the individual accumulators.
+        num_scalars = len(scalars)
+        for i, s in enumerate(scalars):
+            s.copy_(flat[i])
+        offset = num_scalars
+        fr_numel = self.fraction_routed_sum.numel()
+        self.fraction_routed_sum.copy_(
+            flat[offset : offset + fr_numel].view_as(self.fraction_routed_sum)
+        )
+        offset += fr_numel
+        ag_numel = self.avg_gate_prob_sum.numel()
+        self.avg_gate_prob_sum.copy_(
+            flat[offset : offset + ag_numel].view_as(self.avg_gate_prob_sum)
+        )
 
     def finalize(self, processed_batches: int) -> tuple[dict[str, Any], str]:
         denom = max(processed_batches, 1)

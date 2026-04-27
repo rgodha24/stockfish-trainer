@@ -178,14 +178,19 @@ def build_training_state(
         )
 
     setattr(torch._dynamo.config, "cache_size_limit", 32)
-    train_model: torch.nn.Module = model
+    setattr(torch._dynamo.config, "optimize_ddp", True)
+    compiled_inner = torch.compile(model, backend=args.compile_backend)
+    train_model = compiled_inner
     if runtime.is_distributed:
         train_model = DistributedDataParallel(
-            model,
+            compiled_inner,
             device_ids=[runtime.local_rank],
             output_device=runtime.local_rank,
+            broadcast_buffers=False,
+            gradient_as_bucket_view=True,
+            static_graph=True,
         )
-    compiled_model = torch.compile(train_model, backend=args.compile_backend)
+    compiled_model = train_model
     return model, compiled_model, optimizer, scheduler, start_epoch, global_step
 
 
