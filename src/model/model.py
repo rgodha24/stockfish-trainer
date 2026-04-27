@@ -86,30 +86,30 @@ class NNUEModel(nn.Module):
     def forward(
         self,
         us: torch.Tensor,
-        them: torch.Tensor,
         white_indices: torch.Tensor,
-        white_values: torch.Tensor,
         black_indices: torch.Tensor,
-        black_values: torch.Tensor,
         psqt_indices: torch.Tensor,
         layer_stack_indices: torch.Tensor,
     ):
-        wp, bp = self.input(white_indices, white_values, black_indices, black_values)
+        wp, bp = self.input(white_indices, black_indices)
         w, wpsqt = torch.split(wp, self.L1, dim=1)
         b, bpsqt = torch.split(bp, self.L1, dim=1)
 
-        l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
-        l0_ = torch.clamp(l0_, 0.0, 1.0)
-
-        # Pairwise products: multiply first half by second half of each
-        # perspective. Reshape avoids split→cat overhead.
+        # Clamp and pairwise-product each perspective independently, then
+        # select ordering (us-first) with torch.where instead of the old
+        # float multiply-add. Avoids two (N, 2*L1) cat intermediates.
+        chunk = self.L1 // 2
+        us_bool = us.bool()
+        w_c = torch.clamp(w, 0.0, 1.0).reshape(-1, 2, chunk)
+        b_c = torch.clamp(b, 0.0, 1.0).reshape(-1, 2, chunk)
         # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         # and it's more efficient to divide by 128 instead.
-        pairwise_chunk_size = self.L1 // 2
-        l0_ = l0_.reshape(l0_.shape[0], 2, 2, pairwise_chunk_size)
-        l0_ = (l0_[:, :, 0, :] * l0_[:, :, 1, :]).reshape(l0_.shape[0], -1) * (
-            127 / 128
-        )
+        w_pw = w_c[:, 0, :] * w_c[:, 1, :]
+        b_pw = b_c[:, 0, :] * b_c[:, 1, :]
+        l0_ = torch.cat([
+            torch.where(us_bool, w_pw, b_pw),
+            torch.where(us_bool, b_pw, w_pw),
+        ], dim=1) * (127 / 128)
 
         psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
         wpsqt = wpsqt.gather(1, psqt_indices_unsq)

@@ -238,11 +238,8 @@ def run_training(
 
                 (
                     us,
-                    them,
                     white_indices,
-                    white_values,
                     black_indices,
-                    black_values,
                     outcome,
                     score,
                     psqt_indices,
@@ -252,11 +249,8 @@ def run_training(
                 optimizer.zero_grad(set_to_none=True)
                 scorenet, log_dict = compiled_model(
                     us,
-                    them,
                     white_indices,
-                    white_values,
                     black_indices,
-                    black_values,
                     psqt_indices,
                     layer_stack_indices,
                 )

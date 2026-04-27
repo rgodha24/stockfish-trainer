@@ -9,33 +9,21 @@ from .kernel import (
 
 class SparseLinearFunction(autograd.Function):
     @staticmethod
-    def forward(ctx, feature_indices, feature_values, weight, bias):
-        ctx.save_for_backward(feature_indices, feature_values, weight, bias)
+    def forward(ctx, feature_indices, weight, bias):
+        ctx.save_for_backward(feature_indices, weight, bias)
 
         assert len(feature_indices.shape) == 2
-        assert len(feature_values.shape) == 2
-        assert feature_indices.shape[0] == feature_values.shape[0]
-        assert feature_indices.shape[1] == feature_values.shape[1]
         assert feature_indices.dtype == torch.int32
-        assert feature_values.dtype == torch.float32
-
         assert len(weight.shape) == 2
         assert weight.dtype == torch.float32
-
         assert len(bias.shape) == 1
         assert bias.dtype == torch.float32
-
         assert feature_indices.is_cuda
-        assert feature_values.is_cuda
         assert weight.is_cuda
         assert bias.is_cuda
-
-        assert feature_values.device == feature_indices.device
         assert weight.device == feature_indices.device
         assert bias.device == feature_indices.device
-
         assert feature_indices.is_contiguous()
-        assert feature_values.is_contiguous()
         assert weight.is_contiguous()
         assert bias.is_contiguous()
 
@@ -55,18 +43,17 @@ class SparseLinearFunction(autograd.Function):
         kernel = make_sparse_input_linear_forward_kernel(
             max_active_features, output_size
         )
-        kernel(feature_indices, feature_values, weight, bias, output)
+        kernel(feature_indices, weight, bias, output)
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         assert not ctx.needs_input_grad[0]
-        assert not ctx.needs_input_grad[1]
 
         grad_output = grad_output.contiguous()
 
-        feature_indices, feature_values, weight, _bias = ctx.saved_tensors
+        feature_indices, weight, _bias = ctx.saved_tensors
 
         device = feature_indices.device
         max_active_features = feature_indices.shape[1]
@@ -80,6 +67,6 @@ class SparseLinearFunction(autograd.Function):
         kernel = make_sparse_input_linear_backward_kernel(
             max_active_features, output_size
         )
-        kernel(feature_indices, feature_values, weight_grad, bias_grad, grad_output)
+        kernel(feature_indices, weight_grad, bias_grad, grad_output)
 
-        return None, None, weight_grad, bias_grad
+        return None, weight_grad, bias_grad

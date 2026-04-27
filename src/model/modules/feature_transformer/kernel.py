@@ -7,10 +7,10 @@ from tilelang.autotuner import autotune, set_autotune_inputs
 
 
 SparseInputLinearForwardKernel = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None
 ]
 SparseInputLinearBackwardKernel = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None
 ]
 
 
@@ -74,7 +74,6 @@ def _sparse_input_linear_forward_factory(
     @T.prim_func
     def kernel(
         input_indices: T.Tensor((batch_size, max_active_indices), "int32"),
-        input_values: T.Tensor((batch_size, max_active_indices), "float32"),
         weight: T.Tensor((num_inputs, output_size), "float32"),
         bias: T.Tensor((output_size,), "float32"),
         output: T.Tensor((batch_size, output_size), "float32"),
@@ -97,9 +96,8 @@ def _sparse_input_linear_forward_factory(
             for k in T.serial(max_active_indices):
                 idx = input_indices[bx, k]
                 if idx != -1:
-                    val = input_values[bx, k]
                     for p in T.serial(per_thread):
-                        acc[p] += weight[idx, p * threads + tid] * val
+                        acc[p] += weight[idx, p * threads + tid]
 
             for p in T.serial(per_thread):
                 output[bx, p * threads + tid] = acc[p]
@@ -109,25 +107,20 @@ def _sparse_input_linear_forward_factory(
 
 def _build_sorted_backward_inputs(
     input_indices: torch.Tensor,
-    input_values: torch.Tensor,
     flat_batch_indices: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     flat_idx = input_indices.reshape(-1)
-    flat_val = input_values.reshape(-1)
     mask = flat_idx != -1
 
     flat_idx = flat_idx[mask]
     if flat_idx.numel() == 0:
         empty_i32 = torch.empty(0, dtype=torch.int32, device=input_indices.device)
-        empty_f32 = torch.empty(0, dtype=torch.float32, device=input_indices.device)
-        return empty_i32, empty_f32, empty_i32, empty_i32, empty_i32
+        return empty_i32, empty_i32, empty_i32, empty_i32
 
-    flat_val = flat_val[mask]
     flat_bid = flat_batch_indices[mask]
 
     sorted_idx, perm = torch.sort(flat_idx, stable=True)
     sorted_bid = flat_bid[perm]
-    sorted_val = flat_val[perm]
 
     seg_feat, seg_count = torch.unique_consecutive(sorted_idx, return_counts=True)
     seg_start = torch.cat(
@@ -139,7 +132,6 @@ def _build_sorted_backward_inputs(
 
     return (
         sorted_bid.to(torch.int32),
-        sorted_val.contiguous(),
         seg_feat.to(torch.int32),
         seg_count.to(torch.int32),
         seg_start,
@@ -157,7 +149,6 @@ def _sparse_input_linear_backward_factory(output_size, threads, per_thread):
     @T.prim_func
     def kernel(
         sorted_bidx: T.Tensor((nonzero_count,), "int32"),
-        sorted_val: T.Tensor((nonzero_count,), "float32"),
         output_grad: T.Tensor((batch_size, output_size), "float32"),
         seg_start: T.Tensor((unique_count,), "int32"),
         seg_feat: T.Tensor((unique_count,), "int32"),
@@ -186,9 +177,8 @@ def _sparse_input_linear_backward_factory(output_size, threads, per_thread):
 
             for j in T.serial(count):
                 batch_idx = sorted_bidx[start + j]
-                value = sorted_val[start + j]
                 for p in T.serial(per_thread):
-                    acc[p] += output_grad[batch_idx, p * threads + tid] * value
+                    acc[p] += output_grad[batch_idx, p * threads + tid]
 
             for p in T.serial(per_thread):
                 weight_grad[feat, p * threads + tid] = (
@@ -210,13 +200,12 @@ class _LazyForwardKernel:
     def __call__(
         self,
         input_indices: torch.Tensor,
-        input_values: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
         if self._kernel is None:
-            with set_autotune_inputs(input_indices, input_values, weight, bias, output):
+            with set_autotune_inputs(input_indices, weight, bias, output):
                 self._kernel = _sparse_input_linear_forward_factory(
                     self._max_active_indices, self._output_size
                 )
@@ -225,8 +214,8 @@ class _LazyForwardKernel:
             # (used by tilelang's timeout) is not available.
             bwd = self._backward_kernel_ref
             if bwd is not None and bwd._kernel is None:
-                bwd._autotune_from_forward(input_indices, input_values, weight)
-        self._kernel(input_indices, input_values, weight, bias, output)
+                bwd._autotune_from_forward(input_indices, weight)
+        self._kernel(input_indices, weight, bias, output)
 
 
 class _LazyBackwardKernel:
@@ -239,17 +228,14 @@ class _LazyBackwardKernel:
     def _autotune_from_forward(
         self,
         input_indices: torch.Tensor,
-        input_values: torch.Tensor,
         weight: torch.Tensor,
     ) -> None:
         """Autotune using representative forward-pass tensors (called from main thread)."""
         flat_batch_indices = _get_flat_batch_indices(
             input_indices.shape[0], input_indices.shape[1], input_indices.device
         )
-        sorted_bidx, sorted_val, seg_feat, seg_count, seg_start = (
-            _build_sorted_backward_inputs(
-                input_indices, input_values, flat_batch_indices
-            )
+        sorted_bidx, seg_feat, seg_count, seg_start = (
+            _build_sorted_backward_inputs(input_indices, flat_batch_indices)
         )
         if seg_feat.numel() == 0:
             return
@@ -259,7 +245,7 @@ class _LazyBackwardKernel:
             dtype=torch.float32, device=input_indices.device,
         )
         with set_autotune_inputs(
-            sorted_bidx, sorted_val, output_grad,
+            sorted_bidx, output_grad,
             seg_start, seg_feat, seg_count, weight_grad,
         ):
             self._kernel = _sparse_input_linear_backward_factory(
@@ -269,7 +255,6 @@ class _LazyBackwardKernel:
     def __call__(
         self,
         input_indices: torch.Tensor,
-        input_values: torch.Tensor,
         weight_grad: torch.Tensor,
         bias_grad: torch.Tensor,
         output_grad: torch.Tensor,
@@ -277,10 +262,8 @@ class _LazyBackwardKernel:
         flat_batch_indices = _get_flat_batch_indices(
             input_indices.shape[0], input_indices.shape[1], input_indices.device
         )
-        sorted_bidx, sorted_val, seg_feat, seg_count, seg_start = (
-            _build_sorted_backward_inputs(
-                input_indices, input_values, flat_batch_indices
-            )
+        sorted_bidx, seg_feat, seg_count, seg_start = (
+            _build_sorted_backward_inputs(input_indices, flat_batch_indices)
         )
 
         bias_grad.add_(output_grad.sum(dim=0))
@@ -295,7 +278,7 @@ class _LazyBackwardKernel:
             )
 
         self._kernel(
-            sorted_bidx, sorted_val, output_grad,
+            sorted_bidx, output_grad,
             seg_start, seg_feat, seg_count, weight_grad,
         )
 

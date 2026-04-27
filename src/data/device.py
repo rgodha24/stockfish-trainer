@@ -63,11 +63,8 @@ class _PrefetchedBatchIterator(Iterator[Batch]):
 def _move_batch_to_device(batch: Batch, device: torch.device) -> Batch:
     (
         us,
-        them,
         white_indices,
-        white_values,
         black_indices,
-        black_values,
         outcome,
         score,
         psqt_indices,
@@ -76,11 +73,8 @@ def _move_batch_to_device(batch: Batch, device: torch.device) -> Batch:
 
     return (
         us.to(device, non_blocking=True),
-        them.to(device, non_blocking=True),
         white_indices.to(device, non_blocking=True, dtype=torch.int32),
-        white_values.to(device, non_blocking=True),
         black_indices.to(device, non_blocking=True, dtype=torch.int32),
-        black_values.to(device, non_blocking=True),
         outcome.to(device, non_blocking=True),
         score.to(device, non_blocking=True),
         psqt_indices.to(device, non_blocking=True, dtype=torch.int64),

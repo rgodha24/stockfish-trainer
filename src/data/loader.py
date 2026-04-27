@@ -57,7 +57,6 @@ def _default_slab_count(encode_threads: int) -> int:
 class SparseBatchTensorizer:
     def __init__(self, *, pin_memory: bool = False):
         self.pin_memory = pin_memory
-        self._ones_buffer: torch.Tensor | None = None
 
     def _maybe_pin(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pin_memory or not torch.cuda.is_available():
@@ -67,23 +66,8 @@ class SparseBatchTensorizer:
         except RuntimeError:
             return tensor
 
-    def _values_buffer(self, rows: int, cols: int) -> torch.Tensor:
-        if (
-            self._ones_buffer is None
-            or self._ones_buffer.shape[1] != cols
-            or self._ones_buffer.shape[0] < rows
-        ):
-            ones = torch.ones((rows, cols), dtype=torch.float32)
-            try:
-                ones = ones.pin_memory()
-            except RuntimeError:
-                pass
-            self._ones_buffer = ones
-        return self._ones_buffer[:rows]
-
     def to_tuple(self, batch: dict[str, object]) -> Batch:
         us = self._maybe_pin(torch.from_numpy(batch["is_white"]))
-        them = self._maybe_pin(1.0 - us)
         white_indices = self._maybe_pin(torch.from_numpy(batch["white"]))
         black_indices = self._maybe_pin(torch.from_numpy(batch["black"]))
         outcome = self._maybe_pin(torch.from_numpy(batch["outcome"]))
@@ -93,16 +77,10 @@ class SparseBatchTensorizer:
             torch.from_numpy(batch["layer_stack_indices"])
         )
 
-        rows, cols = white_indices.shape
-        values = self._values_buffer(rows, cols)
-
         return (
             us,
-            them,
             white_indices,
-            values,
             black_indices,
-            values,
             outcome,
             score,
             psqt_indices,
