@@ -84,6 +84,8 @@ class RoutingMetricsAccumulator:
     load_floor_loss_sum: torch.Tensor
     load_cap_loss_sum: torch.Tensor
     z_loss_sum: torch.Tensor
+    probe_loss_sum: torch.Tensor
+    probe_weight_sum: torch.Tensor
     entropy_sum: torch.Tensor
     top1_prob_sum: torch.Tensor
     target_prob_sum: torch.Tensor
@@ -108,6 +110,8 @@ class RoutingMetricsAccumulator:
             load_floor_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
             load_cap_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
             z_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
+            probe_loss_sum=torch.zeros((), device=device, dtype=torch.float32),
+            probe_weight_sum=torch.zeros((), device=device, dtype=torch.float32),
             entropy_sum=torch.zeros((), device=device, dtype=torch.float32),
             top1_prob_sum=torch.zeros((), device=device, dtype=torch.float32),
             target_prob_sum=torch.zeros((), device=device, dtype=torch.float32),
@@ -128,6 +132,8 @@ class RoutingMetricsAccumulator:
         load_floor_loss = log_dict.get("routing/load_floor_loss")
         load_cap_loss = log_dict.get("routing/load_cap_loss")
         z_loss = log_dict.get("routing/z_loss")
+        probe_loss = log_dict.get("routing/probe_loss")
+        probe_weight = log_dict.get("routing/probe_weight")
         fraction_routed = log_dict.get("routing/fraction_routed")
         avg_gate_prob = log_dict.get("routing/avg_gate_prob")
         target_prob = log_dict.get("routing/target_prob")
@@ -142,6 +148,8 @@ class RoutingMetricsAccumulator:
             or load_floor_loss is None
             or load_cap_loss is None
             or z_loss is None
+            or probe_loss is None
+            or probe_weight is None
             or fraction_routed is None
             or avg_gate_prob is None
             or target_prob is None
@@ -158,6 +166,8 @@ class RoutingMetricsAccumulator:
         self.load_floor_loss_sum.add_(load_floor_loss.detach().to(dtype=torch.float32))
         self.load_cap_loss_sum.add_(load_cap_loss.detach().to(dtype=torch.float32))
         self.z_loss_sum.add_(z_loss.detach().to(dtype=torch.float32))
+        self.probe_loss_sum.add_(probe_loss.detach().to(dtype=torch.float32))
+        self.probe_weight_sum.add_(probe_weight.detach().to(dtype=torch.float32))
         self.entropy_sum.add_(entropy.detach().to(dtype=torch.float32))
         self.top1_prob_sum.add_(top1_prob.detach().to(dtype=torch.float32))
         self.target_prob_sum.add_(target_prob.detach().to(dtype=torch.float32))
@@ -180,6 +190,8 @@ class RoutingMetricsAccumulator:
             self.load_floor_loss_sum,
             self.load_cap_loss_sum,
             self.z_loss_sum,
+            self.probe_loss_sum,
+            self.probe_weight_sum,
             self.entropy_sum,
             self.top1_prob_sum,
             self.target_prob_sum,
@@ -233,6 +245,12 @@ class RoutingMetricsAccumulator:
             "routing/z_loss_epoch": float(
                 (self.z_loss_sum / denom).detach().cpu().item()
             ),
+            "routing/probe_loss_epoch": float(
+                (self.probe_loss_sum / denom).detach().cpu().item()
+            ),
+            "routing/probe_weight_epoch": float(
+                (self.probe_weight_sum / denom).detach().cpu().item()
+            ),
             "routing/entropy_epoch": float(
                 (self.entropy_sum / denom).detach().cpu().item()
             ),
@@ -277,6 +295,7 @@ class RoutingMetricsAccumulator:
 
         summary = (
             "routing aux={aux:.6f} floor={floor:.6f} cap={cap:.6f} "
+            "probe={probe:.6f}@{probe_weight:.3f} "
             "z={z:.6f} entropy={entropy:.3f} top1={top1:.3f} "
             "agree={agree:.3f} target_prob={target_prob:.3f} teacher_ce={teacher_ce:.3f} "
             "teacher_alpha={teacher_alpha:.3f} "
@@ -285,6 +304,8 @@ class RoutingMetricsAccumulator:
             aux=metrics["routing/aux_loss_epoch"],
             floor=metrics["routing/load_floor_loss_epoch"],
             cap=metrics["routing/load_cap_loss_epoch"],
+            probe=metrics["routing/probe_loss_epoch"],
+            probe_weight=metrics["routing/probe_weight_epoch"],
             z=metrics["routing/z_loss_epoch"],
             entropy=metrics["routing/entropy_epoch"],
             top1=metrics["routing/top1_prob_epoch"],

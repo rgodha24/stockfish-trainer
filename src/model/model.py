@@ -83,6 +83,37 @@ class NNUEModel(nn.Module):
     def clip_input_weights(self):
         self.input.clip_weights(self.quantization)
 
+    def _transform_inputs(
+        self,
+        us: torch.Tensor,
+        white_indices: torch.Tensor,
+        black_indices: torch.Tensor,
+        psqt_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        wp, bp = self.input(white_indices, black_indices)
+        w, wpsqt = torch.split(wp, self.L1, dim=1)
+        b, bpsqt = torch.split(bp, self.L1, dim=1)
+
+        chunk = self.L1 // 2
+        us_bool = us.bool()
+        w_c = torch.clamp(w, 0.0, 1.0).reshape(-1, 2, chunk)
+        b_c = torch.clamp(b, 0.0, 1.0).reshape(-1, 2, chunk)
+        w_pw = w_c[:, 0, :] * w_c[:, 1, :]
+        b_pw = b_c[:, 0, :] * b_c[:, 1, :]
+        l0_ = torch.cat(
+            [
+                torch.where(us_bool, w_pw, b_pw),
+                torch.where(us_bool, b_pw, w_pw),
+            ],
+            dim=1,
+        ) * (127 / 128)
+
+        psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
+        wpsqt = wpsqt.gather(1, psqt_indices_unsq)
+        bpsqt = bpsqt.gather(1, psqt_indices_unsq)
+        psqt = (wpsqt - bpsqt) * (us - 0.5)
+        return l0_, psqt
+
     def forward(
         self,
         us: torch.Tensor,
@@ -90,39 +121,32 @@ class NNUEModel(nn.Module):
         black_indices: torch.Tensor,
         psqt_indices: torch.Tensor,
         layer_stack_indices: torch.Tensor,
+        score: torch.Tensor,
     ):
-        wp, bp = self.input(white_indices, black_indices)
-        w, wpsqt = torch.split(wp, self.L1, dim=1)
-        b, bpsqt = torch.split(bp, self.L1, dim=1)
-
-        # Clamp and pairwise-product each perspective independently, then
-        # select ordering (us-first) with torch.where instead of the old
-        # float multiply-add. Avoids two (N, 2*L1) cat intermediates.
-        chunk = self.L1 // 2
-        us_bool = us.bool()
-        w_c = torch.clamp(w, 0.0, 1.0).reshape(-1, 2, chunk)
-        b_c = torch.clamp(b, 0.0, 1.0).reshape(-1, 2, chunk)
         # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         # and it's more efficient to divide by 128 instead.
-        w_pw = w_c[:, 0, :] * w_c[:, 1, :]
-        b_pw = b_c[:, 0, :] * b_c[:, 1, :]
-        l0_ = torch.cat([
-            torch.where(us_bool, w_pw, b_pw),
-            torch.where(us_bool, b_pw, w_pw),
-        ], dim=1) * (127 / 128)
-
-        psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
-        wpsqt = wpsqt.gather(1, psqt_indices_unsq)
-        bpsqt = bpsqt.gather(1, psqt_indices_unsq)
         # The PSQT values are averaged over perspectives. "Their" perspective
         # has a negative influence (us-0.5 is 0.5 for white and -0.5 for black,
         # which does both the averaging and sign flip for black to move)
-        psqt = (wpsqt - bpsqt) * (us - 0.5)
-
-        stacks_out, log_dict = self.layer_stacks(l0_, layer_stack_indices)
+        l0_, psqt = self._transform_inputs(
+            us,
+            white_indices,
+            black_indices,
+            psqt_indices,
+        )
+        if isinstance(self.layer_stacks, MoELayerStacks):
+            stacks_out, log_dict = self.layer_stacks(
+                l0_,
+                layer_stack_indices,
+                psqt=psqt,
+                score_target=score,
+                score_scale=self.quantization.nnue2score,
+            )
+        else:
+            stacks_out, log_dict = self.layer_stacks(l0_, layer_stack_indices)
         return stacks_out + psqt, log_dict
 
     def set_epoch(self, epoch: int) -> None:
         """Propagate epoch number to layer stacks for curriculum scheduling."""
-        if self.stacks == "moe":
+        if isinstance(self.layer_stacks, MoELayerStacks):
             self.layer_stacks.set_current_epoch(epoch)

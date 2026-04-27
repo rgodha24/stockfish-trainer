@@ -26,6 +26,9 @@ class MoELayerStacks(nn.Module):
         self.router_load_cap = config.router_load_cap
         self.router_teacher_alpha = config.router_teacher_alpha
         self.router_teacher_anneal_epochs = config.router_teacher_anneal_epochs
+        self.probe_loss_alpha = config.probe_loss_alpha
+        self.probe_loss_tau = config.probe_loss_tau
+        self.probe_loss_teacher_threshold = config.probe_loss_teacher_threshold
         self.register_buffer("_teacher_alpha", torch.tensor(0.0))
 
         self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
@@ -104,20 +107,64 @@ class MoELayerStacks(nn.Module):
         l3c_ = torch.einsum("bei,eoi->beo", l2x_, out_w) + out_b
         return l3c_ + l1x_out
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        _ls_indices: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _router_input(self, x: torch.Tensor) -> torch.Tensor:
         half = x.shape[1] // 2
-        router_input = torch.cat(
+        return torch.cat(
             [
                 x[:, : self.ROUTER_FEATURES_PER_PERSPECTIVE],
                 x[:, half : half + self.ROUTER_FEATURES_PER_PERSPECTIVE],
             ],
             dim=1,
         )
-        gate_logits = self.router(router_input)
+
+    def _probe_loss(
+        self,
+        gate_logits: torch.Tensor,
+        expert_indices: torch.Tensor,
+        all_expert_outputs: torch.Tensor,
+        psqt: torch.Tensor,
+        score_target: torch.Tensor,
+        score_scale: float,
+        teacher_alpha: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        zero = gate_logits.new_zeros(())
+        if self.probe_loss_alpha == 0.0:
+            return zero, zero
+
+        threshold = gate_logits.new_tensor(max(self.probe_loss_teacher_threshold, 1e-9))
+        probe_weight = gate_logits.new_tensor(self.probe_loss_alpha)
+        probe_weight = (
+            probe_weight * (threshold - teacher_alpha).clamp_min(0.0) / threshold
+        )
+
+        psqt = psqt.reshape(psqt.shape[0], 1)
+        score_target = score_target.reshape(score_target.shape[0], 1)
+        expert_output = (
+            all_expert_outputs.squeeze(-1) + psqt
+        ) * gate_logits.new_tensor(score_scale)
+        expert_error = (expert_output - score_target).square()
+        expert_error = expert_error - expert_error.min(dim=1, keepdim=True).values
+        probe_target = F.softmax(
+            -expert_error.detach() / gate_logits.new_tensor(self.probe_loss_tau),
+            dim=-1,
+        )
+        probe_loss = F.kl_div(
+            F.log_softmax(gate_logits, dim=-1),
+            probe_target,
+            reduction="batchmean",
+        )
+        return probe_weight, probe_loss
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        _ls_indices: torch.Tensor | None = None,
+        *,
+        psqt: torch.Tensor,
+        score_target: torch.Tensor,
+        score_scale: float,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        gate_logits = self.router(self._router_input(x))
 
         assert _ls_indices is not None
         gate_probs = F.softmax(gate_logits, dim=-1)
@@ -155,19 +202,26 @@ class MoELayerStacks(nn.Module):
         )
         top1_prob = gate_probs.max(dim=-1).values.mean()
         teacher_alpha = self.get_buffer("_teacher_alpha").to(dtype=gate_probs.dtype)
+        all_expert_outputs = self._all_experts_forward(x)
+        probe_weight, probe_loss = self._probe_loss(
+            gate_logits,
+            expert_indices,
+            all_expert_outputs,
+            psqt,
+            score_target,
+            score_scale,
+            teacher_alpha,
+        )
         router_loss = x.new_zeros(())
         if self.training:
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
             router_loss = router_loss + teacher_alpha * teacher_ce
+            router_loss = router_loss + probe_weight * probe_loss
 
         # Dense all-experts path: efficient batched GEMMs with standard
         # autograd, no GPU->CPU syncs in the backward.
-        l3x_ = (
-            self._all_experts_forward(x)
-            .gather(1, expert_indices.view(-1, 1, 1).expand(-1, 1, 1))
-            .squeeze(1)
-        )
+        l3x_ = all_expert_outputs.gather(1, expert_indices.view(-1, 1, 1)).squeeze(1)
         if self.training:
             # Straight-through estimator: forward value stays unscaled,
             # but router gets gradients through gate_prob.
@@ -185,6 +239,8 @@ class MoELayerStacks(nn.Module):
             "routing/bucket_agreement": bucket_agreement,
             "routing/teacher_ce": teacher_ce,
             "routing/teacher_alpha": teacher_alpha,
+            "routing/probe_weight": probe_weight,
+            "routing/probe_loss": probe_loss,
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
         }

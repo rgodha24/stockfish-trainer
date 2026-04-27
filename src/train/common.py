@@ -130,6 +130,9 @@ def build_training_state(
         router_load_cap=args.router_load_cap,
         router_teacher_alpha=args.router_teacher_alpha,
         router_teacher_anneal_epochs=args.router_teacher_anneal_epochs,
+        probe_loss_alpha=args.probe_loss_alpha,
+        probe_loss_tau=args.probe_loss_tau,
+        probe_loss_teacher_threshold=args.probe_loss_teacher_threshold,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
@@ -314,6 +317,7 @@ def run_training(
                     black_indices,
                     psqt_indices,
                     layer_stack_indices,
+                    score,
                 )
                 router_loss = logger.on_batch(log_dict, scorenet)
                 scorenet = scorenet * model.quantization.nnue2score

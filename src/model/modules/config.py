@@ -31,6 +31,12 @@ class LayerStacksConfig:
     """Weight of explicit CE loss toward the piece-count bucket during MoE warm-start."""
     router_teacher_anneal_epochs: int = 0
     """Linearly decay router_teacher_alpha to zero over this many epochs (0 keeps it constant)."""
+    probe_loss_alpha: float = 0.0
+    """Coefficient for the per-expert router probe loss."""
+    probe_loss_tau: float = 0.05
+    """Temperature for soft targets derived from per-expert score error."""
+    probe_loss_teacher_threshold: float = 0.2
+    """Probe loss ramps in once teacher alpha drops below this threshold."""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:
@@ -53,3 +59,9 @@ class LayerStacksConfig:
             raise ValueError("`router_teacher_alpha` must be non-negative.")
         if self.router_teacher_anneal_epochs < 0:
             raise ValueError("`router_teacher_anneal_epochs` must be non-negative.")
+        if self.probe_loss_alpha < 0.0:
+            raise ValueError("`probe_loss_alpha` must be non-negative.")
+        if self.probe_loss_tau <= 0.0:
+            raise ValueError("`probe_loss_tau` must be positive.")
+        if self.probe_loss_teacher_threshold < 0.0:
+            raise ValueError("`probe_loss_teacher_threshold` must be non-negative.")

@@ -29,6 +29,9 @@ class BaseTrainingConfig:
     router_lr_multiplier: float = 1.0
     router_teacher_alpha: float = 0.0
     router_teacher_anneal_epochs: int = 0
+    probe_loss_alpha: float = 0.0
+    probe_loss_tau: float = 0.05
+    probe_loss_teacher_threshold: float = 0.2
 
     lr: float = 8.75e-4
     gamma: float = 0.992
@@ -101,6 +104,12 @@ class BaseTrainingConfig:
             raise ValueError("`router_teacher_alpha` must be non-negative.")
         if self.router_teacher_anneal_epochs < 0:
             raise ValueError("`router_teacher_anneal_epochs` must be non-negative.")
+        if self.probe_loss_alpha < 0.0:
+            raise ValueError("`probe_loss_alpha` must be non-negative.")
+        if self.probe_loss_tau <= 0.0:
+            raise ValueError("`probe_loss_tau` must be positive.")
+        if self.probe_loss_teacher_threshold < 0.0:
+            raise ValueError("`probe_loss_teacher_threshold` must be non-negative.")
 
     def loader_skip_config(self) -> DataloaderSkipConfig:
         return DataloaderSkipConfig(

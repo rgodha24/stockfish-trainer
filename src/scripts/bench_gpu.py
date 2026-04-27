@@ -9,8 +9,10 @@ import torch
 import tyro
 
 from src.data import Batch, iter_device_batches, make_sparse_batch_dataset
+from src.model import NNUEModel
 from src.train.common import build_training_state, compute_loss, set_seed
 from src.train.config import SingleNodeTrainingConfig
+from src.train.distributed import init_training_runtime
 
 
 @dataclass(kw_only=True)
@@ -89,7 +91,7 @@ def preload_device_batches(
 
 
 def run_train_step(
-    model: torch.nn.Module,
+    model: NNUEModel,
     compiled_model: Any,
     optimizer: torch.optim.Optimizer,
     batch: Batch,
@@ -129,7 +131,7 @@ def measured_positions(batches: list[Batch], steps: int) -> int:
 
 def benchmark(
     args: BenchGpuConfig,
-    model: torch.nn.Module,
+    model: NNUEModel,
     compiled_model: Any,
     optimizer: torch.optim.Optimizer,
     batches: list[Batch],
@@ -195,8 +197,9 @@ def main() -> None:
     files, ignored = resolve_binpack_paths(args.datasets)
     set_seed(args.seed)
     device = torch.device("cuda")
+    runtime = init_training_runtime(args, allow_distributed=False)
     model, compiled_model, optimizer, _scheduler, _epoch, _global_step = (
-        build_training_state(args, device)
+        build_training_state(args, device, runtime)
     )
 
     preload_batches, preload_elapsed = preload_device_batches(args, files, device)
