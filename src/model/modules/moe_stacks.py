@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from .config import LayerStacksConfig
-from .sparse_expert_linear import sparse_expert_linear
 from .stacked_linear import FactorizedStackedLinear, StackedLinear
 
 
@@ -105,28 +104,6 @@ class MoELayerStacks(nn.Module):
         l3c_ = torch.einsum("bei,eoi->beo", l2x_, out_w) + out_b
         return l3c_ + l1x_out
 
-    def _sparse_forward(
-        self,
-        x: torch.Tensor,
-        expert_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        l1_weight, l1_bias = self._expert_params(self.l1)
-        l1c_ = sparse_expert_linear(x, expert_indices, l1_weight, l1_bias)
-        l1x_, l1x_out = l1c_.split(self.L2, dim=1)
-        l1x_ = torch.clamp(
-            torch.cat([l1x_.square() * (255 / 256), l1x_], dim=1),
-            0.0,
-            1.0,
-        )
-
-        l2_weight, l2_bias = self._expert_params(self.l2)
-        l2c_ = sparse_expert_linear(l1x_, expert_indices, l2_weight, l2_bias)
-        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
-
-        out_weight, out_bias = self._expert_params(self.output)
-        l3c_ = sparse_expert_linear(l2x_, expert_indices, out_weight, out_bias)
-        return l3c_ + l1x_out
-
     def forward(
         self,
         x: torch.Tensor,
@@ -184,15 +161,13 @@ class MoELayerStacks(nn.Module):
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
             router_loss = router_loss + teacher_alpha * teacher_ce
 
-        # Hard argmax routing (matches inference; sparse kernel on CUDA)
-        if x.is_cuda and x.dtype == torch.float32:
-            l3x_ = self._sparse_forward(x, expert_indices)
-        else:
-            l3x_ = (
-                self._all_experts_forward(x)
-                .gather(1, expert_indices.view(-1, 1, 1).expand(-1, 1, 1))
-                .squeeze(1)
-            )
+        # Dense all-experts path: efficient batched GEMMs with standard
+        # autograd, no GPU->CPU syncs in the backward.
+        l3x_ = (
+            self._all_experts_forward(x)
+            .gather(1, expert_indices.view(-1, 1, 1).expand(-1, 1, 1))
+            .squeeze(1)
+        )
         if self.training:
             # Straight-through estimator: forward value stays unscaled,
             # but router gets gradients through gate_prob.
