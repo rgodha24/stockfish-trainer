@@ -119,17 +119,21 @@ def build_training_state(
         num_experts=args.num_experts,
         aux_loss_alpha=args.aux_loss_alpha,
         z_loss_alpha=args.z_loss_alpha,
+        router_load_floor=args.router_load_floor,
+        router_load_cap=args.router_load_cap,
         router_teacher_alpha=args.router_teacher_alpha,
         router_teacher_anneal_epochs=args.router_teacher_anneal_epochs,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
     # Separate param groups: router gets lower LR
-    router_params = set()
-    if args.stacks == "moe":
-        router_params = set(model.layer_stacks.router.parameters())
-    main_params = [p for p in model.parameters() if p not in router_params]
-    param_groups = [{"params": main_params}]
+    router_module = getattr(model.layer_stacks, "router", None)
+    router_params = (
+        list(router_module.parameters()) if router_module is not None else []
+    )
+    router_param_ids = {id(p) for p in router_params}
+    main_params = [p for p in model.parameters() if id(p) not in router_param_ids]
+    param_groups: list[dict[str, object]] = [{"params": main_params}]
     if router_params:
         param_groups.append(
             {"params": list(router_params), "lr": args.lr * args.router_lr_multiplier}

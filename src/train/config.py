@@ -24,6 +24,8 @@ class BaseTrainingConfig:
     num_experts: int = 8
     aux_loss_alpha: float = 0.001
     z_loss_alpha: float = 0.0
+    router_load_floor: float = 0.0
+    router_load_cap: float = 1.0
     router_lr_multiplier: float = 1.0
     router_teacher_alpha: float = 0.0
     router_teacher_anneal_epochs: int = 0
@@ -89,6 +91,12 @@ class BaseTrainingConfig:
             raise ValueError("`aux_loss_alpha` must be non-negative.")
         if self.z_loss_alpha < 0.0:
             raise ValueError("`z_loss_alpha` must be non-negative.")
+        if not 0.0 <= self.router_load_floor <= 1.0:
+            raise ValueError("`router_load_floor` must be in [0, 1].")
+        if not 0.0 <= self.router_load_cap <= 1.0:
+            raise ValueError("`router_load_cap` must be in [0, 1].")
+        if self.router_load_floor > self.router_load_cap:
+            raise ValueError("`router_load_floor` must be <= `router_load_cap`.")
         if self.router_teacher_alpha < 0.0:
             raise ValueError("`router_teacher_alpha` must be non-negative.")
         if self.router_teacher_anneal_epochs < 0:

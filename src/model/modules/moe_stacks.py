@@ -23,6 +23,8 @@ class MoELayerStacks(nn.Module):
         self.L3 = config.L3
         self.aux_loss_alpha = config.aux_loss_alpha
         self.z_loss_alpha = config.z_loss_alpha
+        self.router_load_floor = config.router_load_floor
+        self.router_load_cap = config.router_load_cap
         self.router_teacher_alpha = config.router_teacher_alpha
         self.router_teacher_anneal_epochs = config.router_teacher_anneal_epochs
         self.register_buffer("_teacher_alpha", torch.tensor(0.0))
@@ -44,7 +46,7 @@ class MoELayerStacks(nn.Module):
         if self.router_teacher_anneal_epochs > 0:
             progress = min(epoch / self.router_teacher_anneal_epochs, 1.0)
             teacher_alpha *= 1.0 - progress
-        self._teacher_alpha.fill_(teacher_alpha)
+        self.get_buffer("_teacher_alpha").fill_(teacher_alpha)
 
     @torch.no_grad()
     def _reset_router(self) -> None:
@@ -70,7 +72,7 @@ class MoELayerStacks(nn.Module):
     def _expert_params(self, layer: StackedLinear) -> tuple[torch.Tensor, torch.Tensor]:
         weight = layer.linear.weight
         bias = layer.linear.bias
-        if hasattr(layer, "factorized_linear"):
+        if isinstance(layer, FactorizedStackedLinear):
             weight = weight + layer.factorized_linear.weight.repeat(layer.count, 1)
             bias = bias + layer.factorized_linear.bias.repeat(layer.count)
         weight = weight.view(layer.count, layer.out_features, layer.in_features)
@@ -153,18 +155,34 @@ class MoELayerStacks(nn.Module):
             gate_probs.dtype
         ) / gate_probs.new_tensor(float(expert_indices.numel()))
         avg_gate_prob = gate_probs.mean(dim=0)
-        aux_loss = self.num_experts * (fraction_routed * avg_gate_prob).sum()
+        load_estimate = avg_gate_prob + (fraction_routed - avg_gate_prob).detach()
+        load_floor_loss = gate_probs.new_zeros(())
+        if self.router_load_floor > 0.0:
+            load_floor_loss = (
+                F.relu(load_estimate.new_tensor(self.router_load_floor) - load_estimate)
+                .square()
+                .mean()
+            )
+        load_cap_loss = gate_probs.new_zeros(())
+        if self.router_load_cap < 1.0:
+            load_cap_loss = (
+                F.relu(load_estimate - load_estimate.new_tensor(self.router_load_cap))
+                .square()
+                .mean()
+            )
+        aux_loss = load_floor_loss + load_cap_loss
         z_loss = torch.logsumexp(gate_logits, dim=-1).square().mean()
         entropy = -(gate_probs * gate_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
         normalized_entropy = entropy / gate_probs.new_tensor(
             math.log(max(self.num_experts, 2))
         )
         top1_prob = gate_probs.max(dim=-1).values.mean()
+        teacher_alpha = self.get_buffer("_teacher_alpha").to(dtype=gate_probs.dtype)
         router_loss = x.new_zeros(())
         if self.training:
             router_loss = x.new_tensor(self.aux_loss_alpha) * aux_loss
             router_loss = router_loss + x.new_tensor(self.z_loss_alpha) * z_loss
-            router_loss = router_loss + self._teacher_alpha * teacher_ce
+            router_loss = router_loss + teacher_alpha * teacher_ce
 
         # Hard argmax routing (matches inference; sparse kernel on CUDA)
         if x.is_cuda and x.dtype == torch.float32:
@@ -183,13 +201,15 @@ class MoELayerStacks(nn.Module):
         return l3x_, {
             "routing/router_loss": router_loss,
             "routing/aux_loss": aux_loss,
+            "routing/load_floor_loss": load_floor_loss,
+            "routing/load_cap_loss": load_cap_loss,
             "routing/z_loss": z_loss,
             "routing/fraction_routed": fraction_routed,
             "routing/avg_gate_prob": avg_gate_prob,
             "routing/target_prob": target_prob,
             "routing/bucket_agreement": bucket_agreement,
             "routing/teacher_ce": teacher_ce,
-            "routing/teacher_alpha": self._teacher_alpha.to(dtype=gate_probs.dtype),
+            "routing/teacher_alpha": teacher_alpha,
             "routing/entropy": normalized_entropy,
             "routing/top1_prob": top1_prob,
         }
