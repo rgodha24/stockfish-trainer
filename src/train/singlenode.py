@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from itertools import repeat
+
 import torch
 import tyro
 
@@ -26,6 +28,8 @@ def make_train_source(
         rank=runtime.rank,
         world_size=runtime.world_size,
     )
+    if args.infinite_repeat:
+        batches = repeat(next(iter(batches)))
     return TrainBatchSource(batches=batches, metrics=lambda: dict(), close=lambda: None)
 
 

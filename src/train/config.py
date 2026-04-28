@@ -32,6 +32,9 @@ class BaseTrainingConfig:
     probe_loss_alpha: float = 0.0
     probe_loss_tau: float = 0.05
     probe_loss_teacher_threshold: float = 0.2
+    probe_loss_ramp_power: float = 1.0
+    probe_loss_ramp_start_epoch: int = 0
+    probe_loss_ramp_end_epoch: int = 0
 
     lr: float = 8.75e-4
     gamma: float = 0.992
@@ -72,6 +75,7 @@ class BaseTrainingConfig:
     distributed_backend: Literal["nccl", "gloo"] = "nccl"
     compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
     resume_from_checkpoint: str | None = None
+    resume_weights_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.datasets:
@@ -110,6 +114,18 @@ class BaseTrainingConfig:
             raise ValueError("`probe_loss_tau` must be positive.")
         if self.probe_loss_teacher_threshold < 0.0:
             raise ValueError("`probe_loss_teacher_threshold` must be non-negative.")
+        if self.probe_loss_ramp_power <= 0.0:
+            raise ValueError("`probe_loss_ramp_power` must be positive.")
+        if self.probe_loss_ramp_start_epoch < 0:
+            raise ValueError("`probe_loss_ramp_start_epoch` must be non-negative.")
+        if self.probe_loss_ramp_end_epoch < 0:
+            raise ValueError("`probe_loss_ramp_end_epoch` must be non-negative.")
+        if self.probe_loss_ramp_end_epoch and (
+            self.probe_loss_ramp_end_epoch <= self.probe_loss_ramp_start_epoch
+        ):
+            raise ValueError(
+                "`probe_loss_ramp_end_epoch` must be greater than `probe_loss_ramp_start_epoch`."
+            )
 
     def loader_skip_config(self) -> DataloaderSkipConfig:
         return DataloaderSkipConfig(
@@ -127,7 +143,7 @@ class BaseTrainingConfig:
 
 @dataclass(kw_only=True)
 class SingleNodeTrainingConfig(BaseTrainingConfig):
-    pass
+    infinite_repeat: bool = False
 
 
 @dataclass(kw_only=True)
