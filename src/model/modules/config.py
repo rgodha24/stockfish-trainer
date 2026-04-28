@@ -37,6 +37,12 @@ class LayerStacksConfig:
     """Temperature for soft targets derived from per-expert score error."""
     probe_loss_teacher_threshold: float = 0.2
     """Probe loss ramps in once teacher alpha drops below this threshold."""
+    probe_loss_ramp_power: float = 1.0
+    """Exponent applied to probe ramp progress for a gentler handoff from teacher."""
+    probe_loss_ramp_start_epoch: int = 0
+    """Epoch where the external probe ramp cap starts increasing from zero."""
+    probe_loss_ramp_end_epoch: int = 0
+    """Epoch where the external probe ramp cap reaches one (<= start disables the cap)."""
 
     def __post_init__(self) -> None:
         if self.L1 <= 0 or self.L2 <= 0 or self.L3 <= 0:
@@ -65,3 +71,9 @@ class LayerStacksConfig:
             raise ValueError("`probe_loss_tau` must be positive.")
         if self.probe_loss_teacher_threshold < 0.0:
             raise ValueError("`probe_loss_teacher_threshold` must be non-negative.")
+        if self.probe_loss_ramp_power <= 0.0:
+            raise ValueError("`probe_loss_ramp_power` must be positive.")
+        if self.probe_loss_ramp_start_epoch < 0:
+            raise ValueError("`probe_loss_ramp_start_epoch` must be non-negative.")
+        if self.probe_loss_ramp_end_epoch < 0:
+            raise ValueError("`probe_loss_ramp_end_epoch` must be non-negative.")

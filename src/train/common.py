@@ -133,6 +133,9 @@ def build_training_state(
         probe_loss_alpha=args.probe_loss_alpha,
         probe_loss_tau=args.probe_loss_tau,
         probe_loss_teacher_threshold=args.probe_loss_teacher_threshold,
+        probe_loss_ramp_power=args.probe_loss_ramp_power,
+        probe_loss_ramp_start_epoch=args.probe_loss_ramp_start_epoch,
+        probe_loss_ramp_end_epoch=args.probe_loss_ramp_end_epoch,
     )
     model = NNUEModel(args.features, model_cfg, QuantizationConfig()).to(device)
 
@@ -177,6 +180,7 @@ def build_training_state(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
+            load_optimizer_state=not args.resume_weights_only,
             emit_log=runtime.is_main_process,
         )
 
@@ -203,6 +207,7 @@ def restore_training_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
+    load_optimizer_state: bool = True,
     emit_log: bool = True,
 ) -> tuple[int, int]:
     if not os.path.exists(path):
@@ -210,14 +215,20 @@ def restore_training_checkpoint(
 
     checkpoint = torch.load(path, map_location="cpu")
     model.load_state_dict(checkpoint["model_state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    if load_optimizer_state:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
     start_epoch = int(checkpoint.get("epoch", -1)) + 1
     global_step = int(checkpoint.get("global_step", 0))
     if emit_log:
         print(
-            f"resumed checkpoint {path} at epoch={start_epoch:03d} global_step={global_step}",
+            "resumed checkpoint {} at epoch={:03d} global_step={}{}".format(
+                path,
+                start_epoch,
+                global_step,
+                " (weights only)" if not load_optimizer_state else "",
+            ),
             flush=True,
         )
     return start_epoch, global_step

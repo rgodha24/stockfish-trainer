@@ -29,7 +29,11 @@ class MoELayerStacks(nn.Module):
         self.probe_loss_alpha = config.probe_loss_alpha
         self.probe_loss_tau = config.probe_loss_tau
         self.probe_loss_teacher_threshold = config.probe_loss_teacher_threshold
+        self.probe_loss_ramp_power = config.probe_loss_ramp_power
+        self.probe_loss_ramp_start_epoch = config.probe_loss_ramp_start_epoch
+        self.probe_loss_ramp_end_epoch = config.probe_loss_ramp_end_epoch
         self.register_buffer("_teacher_alpha", torch.tensor(0.0))
+        self.register_buffer("_current_epoch", torch.tensor(0.0))
 
         self.router = nn.Linear(self.ROUTER_INPUT_DIM, num_experts)
         self._reset_router()
@@ -44,6 +48,7 @@ class MoELayerStacks(nn.Module):
 
     def set_current_epoch(self, epoch: int) -> None:
         """Set current epoch for teacher CE scheduling."""
+        self.get_buffer("_current_epoch").fill_(float(epoch))
         teacher_alpha = self.router_teacher_alpha
         if self.router_teacher_anneal_epochs > 0:
             progress = min(epoch / self.router_teacher_anneal_epochs, 1.0)
@@ -132,10 +137,30 @@ class MoELayerStacks(nn.Module):
             return zero, zero
 
         threshold = gate_logits.new_tensor(max(self.probe_loss_teacher_threshold, 1e-9))
-        probe_weight = gate_logits.new_tensor(self.probe_loss_alpha)
-        probe_weight = (
-            probe_weight * (threshold - teacher_alpha).clamp_min(0.0) / threshold
+        probe_progress = (threshold - teacher_alpha).clamp_min(0.0) / threshold
+        probe_progress = probe_progress.pow(self.probe_loss_ramp_power)
+        epoch_progress = (
+            self.get_buffer("_current_epoch")
+            - gate_logits.new_tensor(float(self.probe_loss_ramp_start_epoch))
+        ) / gate_logits.new_tensor(
+            float(
+                max(
+                    self.probe_loss_ramp_end_epoch - self.probe_loss_ramp_start_epoch, 1
+                )
+            )
         )
+        epoch_progress = epoch_progress.clamp(0.0, 1.0)
+        epoch_progress = torch.maximum(
+            epoch_progress,
+            gate_logits.new_tensor(
+                float(
+                    self.probe_loss_ramp_end_epoch <= self.probe_loss_ramp_start_epoch
+                )
+            ),
+        )
+        probe_progress = torch.minimum(probe_progress, epoch_progress)
+        probe_weight = gate_logits.new_tensor(self.probe_loss_alpha)
+        probe_weight = probe_weight * probe_progress
 
         psqt = psqt.reshape(psqt.shape[0], 1)
         score_target = score_target.reshape(score_target.shape[0], 1)

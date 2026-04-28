@@ -120,12 +120,6 @@ class BaseTrainingConfig:
             raise ValueError("`probe_loss_ramp_start_epoch` must be non-negative.")
         if self.probe_loss_ramp_end_epoch < 0:
             raise ValueError("`probe_loss_ramp_end_epoch` must be non-negative.")
-        if self.probe_loss_ramp_end_epoch and (
-            self.probe_loss_ramp_end_epoch <= self.probe_loss_ramp_start_epoch
-        ):
-            raise ValueError(
-                "`probe_loss_ramp_end_epoch` must be greater than `probe_loss_ramp_start_epoch`."
-            )
 
     def loader_skip_config(self) -> DataloaderSkipConfig:
         return DataloaderSkipConfig(
