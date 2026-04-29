@@ -1,5 +1,15 @@
 # stockfish-trainer
 
+this is a faster rewrite of the [stockfish nnue pytorch trainer](https://github.com/official-stockfish/nnue-pytorch)
+
+improvements:
+
+- tile lang based custom cuda kernel for spare forward and backwards passes. ~4x speedup
+- vendored & rewritten ranger21 optimizer. this enabled kernel fusion via torch.compile for a ~5x speedup
+- rust based rewritten dataloader. it scales across cpu cores much better (its not constrained by locking), and also supports much faster & better DDP (e.g. multigpu and even multi node) support. speedup is hard to measure due to how much better it scales across large amounts of cpu, but it is ~10x in some cases. it also provides a better data distribution across a large amount of .binpack'd positions than the previous cpp implementation.
+- stacks = moe, stacks = none, stacks = layer. e.g. support for the smart router/MoE based experts that we are researching
+- ray based distributed data decode/encode support. this basically just splits up the cpu work across multiple servers/vms and sends the data across the network efficiently with good batching, mainly to enable training on GT PACE ICE, which has slow cpus on ~all of its GPU nodes.
+
 ## layout
 
 `src/rust/` - rust dataloader
@@ -8,6 +18,8 @@
 `src/train/` - train code
 `src/ranger22/` - faster rewrite of Ranger21 optimizer
 `src/distributed/` - distributed training code (use ray to split dataloading across multiple nodes)
+`stockfish/` - stockfish fork that supports moe stacks, layer stacks, and no stacks with compile time switching
+`BUILD.md` - build instructions & cutechess cli examples
 
 ## commands
 
@@ -21,7 +33,7 @@ uvx hf download official-stockfish/master-binpacks multinet_pv-2_diff-100_nodes-
 uvx hf download vondele/from_kaggle_2 T60T70wIsRightFarseerT60T74T75T76.split_0.binpack T60T70wIsRightFarseerT60T74T75T76.split_1.binpack T60T70wIsRightFarseerT60T74T75T76.split_2.binpack T60T70wIsRightFarseerT60T74T75T76.split_3.binpack T60T70wIsRightFarseerT60T74T75T76.split_4.binpack --repo-type dataset --local-dir .
 ```
 
-training command:
+example training command:
 
 ```bash
 nix develop -c uv run --no-sync python -m src.train.singlenode \
