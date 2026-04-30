@@ -289,6 +289,18 @@ def run_training(
             args.epoch_size,
             args.batch_size,
         )
+        bench = getattr(args, "bench", False)
+        profiler = None
+        if bench:
+            profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(wait=5, warmup=5, active=20, repeat=1),
+                record_shapes=True,
+                with_stack=True,
+            )
         final_epoch = start_epoch - 1
         device_batches = iter_device_batches(
             source.batches,
@@ -303,6 +315,9 @@ def run_training(
             epoch_start = time.time()
             processed_batches = 0
             logger.start_epoch(source.metrics() if source.metrics is not None else None)
+
+            if profiler is not None:
+                profiler.start()
 
             for batch_idx, batch in enumerate(device_batches):
                 if batch_idx >= num_batches:
@@ -346,6 +361,24 @@ def run_training(
                     num_batches=num_batches,
                     loss=loss,
                 )
+
+                if profiler is not None:
+                    profiler.step()
+                    if batch_idx >= 29:
+                        break
+
+            if profiler is not None:
+                profiler.stop()
+                if runtime.is_main_process:
+                    print(
+                        profiler.key_averages().table(
+                            sort_by="cuda_time_total", row_limit=10
+                        )
+                    )
+                    trace_path = os.path.join(args.default_root_dir, "bench_trace.json")
+                    profiler.export_chrome_trace(trace_path)
+                    print(f"Profiler trace saved to {trace_path}")
+                return
 
             scheduler.step()
             if processed_batches == 0:

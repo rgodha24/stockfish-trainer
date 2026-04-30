@@ -138,6 +138,7 @@ class BaseTrainingConfig:
 @dataclass(kw_only=True)
 class SingleNodeTrainingConfig(BaseTrainingConfig):
     infinite_repeat: bool = False
+    bench: bool = False
 
 
 @dataclass(kw_only=True)

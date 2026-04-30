@@ -28,7 +28,7 @@ def make_train_source(
         rank=runtime.rank,
         world_size=runtime.world_size,
     )
-    if args.infinite_repeat:
+    if args.infinite_repeat or args.bench:
         batches = repeat(next(iter(batches)))
     return TrainBatchSource(batches=batches, metrics=lambda: dict(), close=lambda: None)
 
