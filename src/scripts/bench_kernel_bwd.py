@@ -1,48 +1,76 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 import torch
 
+from src.data import make_sparse_batch_dataset
+from src.data.loader import DataloaderSkipConfig
 from src.model.modules.feature_transformer.kernel import (
     make_sparse_input_linear_backward_kernel,
 )
 
 
-def benchmark(
+def _load_one_batch(
+    binpack: str,
+    feature_set: str,
     batch_size: int,
-    max_active_indices: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    ds = make_sparse_batch_dataset(
+        feature_set=feature_set,
+        filenames=[binpack],
+        batch_size=batch_size,
+        cyclic=False,
+        loader_threads=2,
+        config=DataloaderSkipConfig(),
+        shuffle_buffer_entries=0,
+        pin_memory=False,
+    )
+    batch = next(iter(ds))
+    _, white_indices, black_indices, _, _, _, _ = batch
+    return (
+        white_indices.to(device, dtype=torch.int32),
+        black_indices.to(device, dtype=torch.int32),
+    )
+
+
+def benchmark(
+    white_indices: torch.Tensor,
+    black_indices: torch.Tensor,
     num_inputs: int,
     output_size: int,
     device: torch.device,
     warmup: int,
     measure: int,
 ) -> dict[str, float]:
-    # Generate realistic sparse indices: half active, rest -1 (padding)
-    input_indices = torch.randint(
-        0,
-        num_inputs,
-        (batch_size, max_active_indices),
-        dtype=torch.int32,
-        device=device,
-    )
-    mask = torch.rand(batch_size, max_active_indices, device=device) < 0.5
-    input_indices = torch.where(mask, input_indices, torch.full_like(input_indices, -1))
+    max_active_indices = white_indices.shape[1]
+    batch_size = white_indices.shape[0]
 
-    weight_grad = torch.zeros(
+    weight_grad_w = torch.zeros(
         num_inputs, output_size, dtype=torch.float32, device=device
     )
-    bias_grad = torch.zeros(output_size, dtype=torch.float32, device=device)
-    output_grad = torch.randn(
+    bias_grad_w = torch.zeros(output_size, dtype=torch.float32, device=device)
+    output_grad_w = torch.randn(
+        batch_size, output_size, dtype=torch.float32, device=device
+    )
+
+    weight_grad_b = torch.zeros(
+        num_inputs, output_size, dtype=torch.float32, device=device
+    )
+    bias_grad_b = torch.zeros(output_size, dtype=torch.float32, device=device)
+    output_grad_b = torch.randn(
         batch_size, output_size, dtype=torch.float32, device=device
     )
 
     kernel = make_sparse_input_linear_backward_kernel(max_active_indices, output_size)
 
-    # Warmup (triggers autotune + compilation)
+    # Warmup (triggers autotune + compilation; includes sort/prep)
     for _ in range(warmup):
-        kernel(input_indices, weight_grad, bias_grad, output_grad)
+        kernel(white_indices, weight_grad_w, bias_grad_w, output_grad_w)
+        kernel(black_indices, weight_grad_b, bias_grad_b, output_grad_b)
     torch.cuda.synchronize(device)
 
     # Measure
@@ -51,7 +79,8 @@ def benchmark(
     host_started_at = time.perf_counter()
     start_event.record()
     for _ in range(measure):
-        kernel(input_indices, weight_grad, bias_grad, output_grad)
+        kernel(white_indices, weight_grad_w, bias_grad_w, output_grad_w)
+        kernel(black_indices, weight_grad_b, bias_grad_b, output_grad_b)
     end_event.record()
     torch.cuda.synchronize(device)
 
@@ -70,10 +99,11 @@ def benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark sparse input linear backward kernel"
+        description="Benchmark sparse input linear backward kernel with real data"
     )
-    parser.add_argument("--batch_size", type=int, default=16384)
-    parser.add_argument("--max_active_indices", type=int, default=64)
+    parser.add_argument("binpack", type=str, help="Path to .binpack file")
+    parser.add_argument("--batch_size", type=int, default=65536)
+    parser.add_argument("--feature_set", type=str, default="Full_Threats+HalfKAv2_hm")
     parser.add_argument("--num_inputs", type=int, default=22528)
     parser.add_argument("--output_size", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda")
@@ -81,12 +111,21 @@ def main() -> None:
     parser.add_argument("--measure", type=int, default=128)
     args = parser.parse_args()
 
+    if not os.path.isfile(args.binpack):
+        raise FileNotFoundError(args.binpack)
+
     torch.backends.cuda.matmul.allow_tf32 = True
     device = torch.device(args.device)
 
+    white_indices, black_indices = _load_one_batch(
+        args.binpack, args.feature_set, args.batch_size, device
+    )
+    actual_batch_size = white_indices.shape[0]
+    actual_max_active = white_indices.shape[1]
+
     metrics = benchmark(
-        batch_size=args.batch_size,
-        max_active_indices=args.max_active_indices,
+        white_indices=white_indices,
+        black_indices=black_indices,
         num_inputs=args.num_inputs,
         output_size=args.output_size,
         device=device,
@@ -96,7 +135,7 @@ def main() -> None:
 
     print(
         f"gpu={torch.cuda.get_device_name(device)} "
-        f"batch_size={args.batch_size} max_active_indices={args.max_active_indices} "
+        f"batch_size={actual_batch_size} max_active_indices={actual_max_active} "
         f"num_inputs={args.num_inputs} output_size={args.output_size} "
         f"warmup={args.warmup} measure={args.measure}",
         flush=True,
