@@ -300,6 +300,7 @@ def run_training(
                 schedule=torch.profiler.schedule(wait=5, warmup=5, active=20, repeat=1),
                 record_shapes=True,
                 with_stack=True,
+                with_modules=True,
             )
         final_epoch = start_epoch - 1
         device_batches = iter_device_batches(
@@ -370,14 +371,20 @@ def run_training(
             if profiler is not None:
                 profiler.stop()
                 if runtime.is_main_process:
-                    print(
-                        profiler.key_averages().table(
-                            sort_by="cuda_time_total", row_limit=10
-                        )
+                    avg = profiler.key_averages()
+                    print("\n========== CUDA Time (Top 50) ==========")
+                    print(avg.table(sort_by="cuda_time_total", row_limit=50))
+                    print("\n========== CPU Time (Top 50) ==========")
+                    print(avg.table(sort_by="cpu_time_total", row_limit=50))
+                    trace_path = os.path.join(
+                        args.default_root_dir,
+                        f"bench_trace_{time.strftime('%Y%m%d_%H%M%S')}.json",
                     )
-                    trace_path = os.path.join(args.default_root_dir, "bench_trace.json")
                     profiler.export_chrome_trace(trace_path)
-                    print(f"Profiler trace saved to {trace_path}")
+                    print(f"\nFlamegraph trace saved to {trace_path}")
+                    print(
+                        "View: open chrome://tracing or edge://tracing and load the file"
+                    )
                 return
 
             scheduler.step()
