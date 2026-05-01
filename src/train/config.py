@@ -76,6 +76,7 @@ class BaseTrainingConfig:
     compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
     resume_from_checkpoint: str | None = None
     resume_weights_only: bool = False
+    nvtx_profile: bool = False
 
     def __post_init__(self) -> None:
         if not self.datasets:

@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import random
 import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
+from collections.abc import Iterator
 from typing import Any, Callable, Iterable
 
 import torch
@@ -18,6 +20,20 @@ from src.train.distributed import DistributedRuntime, init_training_runtime
 from src.train.log import TrainingLogger
 
 LoaderMetricsFn = Callable[[], dict[str, float | int]]
+
+
+@contextmanager
+def nvtx_range(enabled: bool, name: str) -> Iterator[None]:
+    if not enabled:
+        with nullcontext():
+            yield
+        return
+
+    torch.cuda.nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        torch.cuda.nvtx.range_pop()
 
 
 @dataclass(slots=True)
@@ -290,6 +306,7 @@ def run_training(
             args.batch_size,
         )
         bench = getattr(args, "bench", False)
+        nvtx_profile = getattr(args, "nvtx_profile", False)
         profiler = None
         if bench:
             profiler = torch.profiler.profile(
@@ -323,35 +340,43 @@ def run_training(
             for batch_idx, batch in enumerate(device_batches):
                 if batch_idx >= num_batches:
                     break
-                if batch_idx == 0:
-                    model.clip_input_weights()
-                model.clip_weights()
+                with nvtx_range(nvtx_profile, "train_step"):
+                    if batch_idx == 0:
+                        with nvtx_range(nvtx_profile, "clip_input_weights"):
+                            model.clip_input_weights()
+                    with nvtx_range(nvtx_profile, "clip_weights"):
+                        model.clip_weights()
 
-                (
-                    us,
-                    white_indices,
-                    black_indices,
-                    outcome,
-                    score,
-                    psqt_indices,
-                    layer_stack_indices,
-                ) = batch
+                    (
+                        us,
+                        white_indices,
+                        black_indices,
+                        outcome,
+                        score,
+                        psqt_indices,
+                        layer_stack_indices,
+                    ) = batch
 
-                optimizer.zero_grad(set_to_none=True)
-                scorenet, log_dict = compiled_model(
-                    us,
-                    white_indices,
-                    black_indices,
-                    psqt_indices,
-                    layer_stack_indices,
-                    score,
-                )
-                router_loss = logger.on_batch(log_dict, scorenet)
-                scorenet = scorenet * model.quantization.nnue2score
-                loss = compute_loss(scorenet, outcome, score, args, epoch)
-                loss = loss + router_loss
-                loss.backward()
-                optimizer.step()
+                    with nvtx_range(nvtx_profile, "zero_grad"):
+                        optimizer.zero_grad(set_to_none=True)
+                    with nvtx_range(nvtx_profile, "forward"):
+                        scorenet, log_dict = compiled_model(
+                            us,
+                            white_indices,
+                            black_indices,
+                            psqt_indices,
+                            layer_stack_indices,
+                            score,
+                        )
+                    with nvtx_range(nvtx_profile, "loss"):
+                        router_loss = logger.on_batch(log_dict, scorenet)
+                        scorenet = scorenet * model.quantization.nnue2score
+                        loss = compute_loss(scorenet, outcome, score, args, epoch)
+                        loss = loss + router_loss
+                    with nvtx_range(nvtx_profile, "backward"):
+                        loss.backward()
+                    with nvtx_range(nvtx_profile, "optimizer_step"):
+                        optimizer.step()
 
                 epoch_loss_sum.add_(loss.detach())
                 global_step += 1
