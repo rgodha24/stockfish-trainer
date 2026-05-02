@@ -35,6 +35,20 @@ def _divisor_threads(output_size: int, lo: int = 32, hi: int = 1024) -> list[dic
     ]
 
 
+def _closest_thread_config(output_size: int, target_threads: int) -> dict:
+    configs = _divisor_threads(output_size)
+    if not configs:
+        raise ValueError(f"no valid thread config for output_size={output_size}")
+    best = configs[0]
+    best_distance = abs(best["threads"] - target_threads)
+    for config in configs[1:]:
+        distance = abs(config["threads"] - target_threads)
+        if distance < best_distance:
+            best = config
+            best_distance = distance
+    return best
+
+
 def _forward_configs(*args, **_kwargs):
     # tilelang 0.1.8 passes (args_tuple, kwargs_tuple) instead of unpacking
     if args and isinstance(args[0], tuple):
@@ -50,10 +64,13 @@ def _backward_configs(*args, **_kwargs):
         output_size = args[0][0]
     else:
         output_size = args[0]
-    return _divisor_threads(output_size)
+    return [_closest_thread_config(output_size, 516)]
 
 
 _flat_batch_index_cache: dict[tuple[int, int, int], torch.Tensor] = {}
+
+_HOT_SEGMENT_THRESHOLD = 4096
+_HOT_SEGMENT_SPLITS = 4
 
 
 def _get_flat_batch_indices(
@@ -146,6 +163,19 @@ def _build_sorted_backward_inputs(
     )
 
 
+def _split_backward_segments(
+    seg_feat: torch.Tensor,
+    seg_count: torch.Tensor,
+    seg_start: torch.Tensor,
+) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    hot_mask = seg_count > _HOT_SEGMENT_THRESHOLD
+    cold_mask = ~hot_mask
+    return (
+        (seg_feat[cold_mask], seg_count[cold_mask], seg_start[cold_mask]),
+        (seg_feat[hot_mask], seg_count[hot_mask], seg_start[hot_mask]),
+    )
+
+
 @autotune(configs=_backward_configs, warmup=5, rep=20, timeout=30, skip_check=True)
 @tilelang.jit
 def _sparse_input_linear_backward_factory(output_size, threads, per_thread):
@@ -189,9 +219,76 @@ def _sparse_input_linear_backward_factory(output_size, threads, per_thread):
                     acc[p] += output_grad[batch_idx, p * threads + tid]
 
             for p in T.serial(per_thread):
-                weight_grad[feat, p * threads + tid] = (
-                    weight_grad[feat, p * threads + tid] + acc[p]
-                )
+                weight_grad[feat, p * threads + tid] = acc[p]
+
+    return kernel
+
+@tilelang.jit
+def _sparse_input_linear_backward_hot_factory(output_size, threads, per_thread, split_k):
+    batch_size = T.dynamic("batch_size")
+    nonzero_count = T.dynamic("nonzero_count")
+    hot_count = T.dynamic("hot_count")
+
+    @T.prim_func
+    def kernel(
+        sorted_bidx: T.Tensor((nonzero_count,), "int32"),
+        output_grad: T.Tensor((batch_size, output_size), "float32"),
+        hot_start: T.Tensor((hot_count,), "int32"),
+        hot_count_tensor: T.Tensor((hot_count,), "int32"),
+        partials: T.Tensor((hot_count, split_k, output_size), "float32"),
+    ):
+        with T.Kernel(hot_count * split_k, threads=threads) as b:
+            tid = T.get_thread_binding(0)
+            acc = T.alloc_fragment((per_thread,), "float32")
+            hot_idx = b // split_k
+            split_idx = b - hot_idx * split_k
+
+            for p in T.serial(per_thread):
+                acc[p] = T.float32(0)
+
+            start = hot_start[hot_idx]
+            count = hot_count_tensor[hot_idx]
+            chunk_start = start + (count * split_idx) // split_k
+            chunk_end = start + (count * (split_idx + 1)) // split_k
+
+            for j in T.serial(chunk_end - chunk_start):
+                batch_idx = sorted_bidx[chunk_start + j]
+                for p in T.serial(per_thread):
+                    acc[p] += output_grad[batch_idx, p * threads + tid]
+
+            for p in T.serial(per_thread):
+                partials[hot_idx, split_idx, p * threads + tid] = acc[p]
+
+    return kernel
+
+
+@tilelang.jit
+def _sparse_input_linear_backward_hot_reduce_factory(
+    output_size, threads, per_thread, split_k
+):
+    hot_count = T.dynamic("hot_count")
+    num_inputs = T.dynamic("num_inputs")
+
+    @T.prim_func
+    def kernel(
+        hot_feat: T.Tensor((hot_count,), "int32"),
+        partials: T.Tensor((hot_count, split_k, output_size), "float32"),
+        weight_grad: T.Tensor((num_inputs, output_size), "float32"),
+    ):
+        with T.Kernel(hot_count, threads=threads) as bh:
+            tid = T.get_thread_binding(0)
+            acc = T.alloc_fragment((per_thread,), "float32")
+            feat = hot_feat[bh]
+
+            for p in T.serial(per_thread):
+                acc[p] = T.float32(0)
+
+            for s in T.serial(split_k):
+                for p in T.serial(per_thread):
+                    acc[p] += partials[bh, s, p * threads + tid]
+
+            for p in T.serial(per_thread):
+                weight_grad[feat, p * threads + tid] = acc[p]
 
     return kernel
 
@@ -232,6 +329,8 @@ class _LazyBackwardKernel:
     def __init__(self, output_size: int):
         self._output_size = output_size
         self._kernel = None
+        self._hot_kernel = None
+        self._hot_reduce_kernel = None
 
     def _autotune_from_forward(
         self,
@@ -278,7 +377,7 @@ class _LazyBackwardKernel:
             input_indices, flat_batch_indices
         )
 
-        bias_grad.add_(output_grad.sum(dim=0))
+        bias_grad.copy_(output_grad.sum(dim=0))
         if seg_feat.numel() == 0:
             return
 
@@ -288,15 +387,51 @@ class _LazyBackwardKernel:
             self._kernel = _sparse_input_linear_backward_factory(
                 self._output_size, best["threads"], best["per_thread"]
             )
+        if self._hot_kernel is None:
+            best = _closest_thread_config(self._output_size, 344)
+            self._hot_kernel = _sparse_input_linear_backward_hot_factory(
+                self._output_size,
+                best["threads"],
+                best["per_thread"],
+                _HOT_SEGMENT_SPLITS,
+            )
+            self._hot_reduce_kernel = _sparse_input_linear_backward_hot_reduce_factory(
+                self._output_size,
+                best["threads"],
+                best["per_thread"],
+                _HOT_SEGMENT_SPLITS,
+            )
 
-        self._kernel(
-            sorted_bidx,
-            output_grad,
-            seg_start,
-            seg_feat,
-            seg_count,
-            weight_grad,
+        (cold_feat, cold_count, cold_start), (hot_feat, hot_count, hot_start) = (
+            _split_backward_segments(seg_feat, seg_count, seg_start)
         )
+
+        if cold_feat.numel() != 0:
+            self._kernel(
+                sorted_bidx,
+                output_grad,
+                cold_start,
+                cold_feat,
+                cold_count,
+                weight_grad,
+            )
+
+        if hot_feat.numel() != 0:
+            partials = torch.empty(
+                hot_feat.shape[0],
+                _HOT_SEGMENT_SPLITS,
+                self._output_size,
+                dtype=torch.float32,
+                device=output_grad.device,
+            )
+            self._hot_kernel(
+                sorted_bidx,
+                output_grad,
+                hot_start,
+                hot_count,
+                partials,
+            )
+            self._hot_reduce_kernel(hot_feat, partials, weight_grad)
 
 
 _forward_kernel_cache: dict[tuple[int, int], _LazyForwardKernel] = {}
