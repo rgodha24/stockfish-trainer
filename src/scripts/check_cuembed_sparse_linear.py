@@ -49,13 +49,12 @@ def sparse_linear_backward_reference(
     return grad_weight
 
 
-def check_correctness(device: torch.device) -> None:
-    torch.manual_seed(1234)
-    batch_size = 128
-    max_active = 10
-    num_features = 257
-    output_size = 64
-
+def make_random_csr(
+    batch_size: int,
+    max_active: int,
+    num_features: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
     counts = torch.randint(0, max_active + 1, (batch_size,), device=device)
     offsets = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
     offsets[:1].zero_()
@@ -63,24 +62,54 @@ def check_correctness(device: torch.device) -> None:
     flat_indices = torch.randint(
         0, num_features, (int(offsets[-1].item()),), dtype=torch.int32, device=device
     )
+    return flat_indices, offsets
+
+
+def check_correctness(device: torch.device) -> None:
+    torch.manual_seed(1234)
+    batch_size = 128
+    max_active = 10
+    num_features = 257
+    output_size = 64
+
+    flat_indices_0, offsets_0 = make_random_csr(
+        batch_size, max_active, num_features, device
+    )
+    flat_indices_1, offsets_1 = make_random_csr(
+        batch_size, max_active, num_features, device
+    )
 
     weight = torch.randn(num_features, output_size, dtype=torch.float32, device=device)
     bias = torch.randn(output_size, dtype=torch.float32, device=device)
-    grad_output = torch.randn(batch_size, output_size, dtype=torch.float32, device=device)
+    grad_output_0 = torch.randn(batch_size, output_size, dtype=torch.float32, device=device)
+    grad_output_1 = torch.randn(batch_size, output_size, dtype=torch.float32, device=device)
 
     weight_cu = weight.detach().clone().requires_grad_(True)
     bias_cu = bias.detach().clone().requires_grad_(True)
-    output_cu = SparseLinearFunction.apply(flat_indices, offsets, weight_cu, bias_cu)
-    output_cu.backward(grad_output)
-
-    output_ref = sparse_linear_reference(flat_indices, offsets, weight, bias)
-    grad_weight_ref = sparse_linear_backward_reference(
-        flat_indices, offsets, grad_output, num_features
+    output_cu_0, output_cu_1 = SparseLinearFunction.apply(
+        flat_indices_0,
+        offsets_0,
+        flat_indices_1,
+        offsets_1,
+        weight_cu,
+        bias_cu,
     )
-    bias_grad_ref = grad_output.sum(dim=0)
+    torch.autograd.backward((output_cu_0, output_cu_1), (grad_output_0, grad_output_1))
+
+    output_ref_0 = sparse_linear_reference(flat_indices_0, offsets_0, weight, bias)
+    output_ref_1 = sparse_linear_reference(flat_indices_1, offsets_1, weight, bias)
+    grad_weight_ref = sparse_linear_backward_reference(
+        flat_indices_0, offsets_0, grad_output_0, num_features
+    ) + sparse_linear_backward_reference(
+        flat_indices_1, offsets_1, grad_output_1, num_features
+    )
+    bias_grad_ref = grad_output_0.sum(dim=0) + grad_output_1.sum(dim=0)
     torch.cuda.synchronize(device)
 
-    fwd_diff = (output_cu - output_ref).abs().max().item()
+    fwd_diff = max(
+        (output_cu_0 - output_ref_0).abs().max().item(),
+        (output_cu_1 - output_ref_1).abs().max().item(),
+    )
     bwd_diff = (weight_cu.grad - grad_weight_ref).abs().max().item()
     bias_diff = (bias_cu.grad - bias_grad_ref).abs().max().item()
     print(
@@ -168,9 +197,15 @@ def benchmark(
         device,
         warmup,
         measure,
-        lambda: (
-            ext.cuembed_backward(flat_w, offsets_w, grad_w, num_features),
-            ext.cuembed_backward(flat_b, offsets_b, grad_b, num_features),
+        lambda: fused_backward(
+            ext,
+            flat_w,
+            offsets_w,
+            grad_w,
+            flat_b,
+            offsets_b,
+            grad_b,
+            num_features,
         ),
     )
 
@@ -181,10 +216,27 @@ def benchmark(
         flush=True,
     )
     print(
-        f"cuembed_direct_fwd_ms={fwd_ms:.3f} "
-        f"cuembed_direct_bwd_ms={bwd_ms:.3f} warmup={warmup} measure={measure}",
+        f"cuembed_direct_pair_fwd_ms={fwd_ms:.3f} "
+        f"cuembed_direct_fused_bwd_ms={bwd_ms:.3f} warmup={warmup} measure={measure}",
         flush=True,
     )
+
+
+def fused_backward(
+    ext,
+    flat_w: torch.Tensor,
+    offsets_w: torch.Tensor,
+    grad_w: torch.Tensor,
+    flat_b: torch.Tensor,
+    offsets_b: torch.Tensor,
+    grad_b: torch.Tensor,
+    num_features: int,
+) -> torch.Tensor:
+    grad_weight = ext.cuembed_backward(flat_w, offsets_w, grad_w, num_features)
+    grad_weight.add_(
+        ext.cuembed_backward(flat_b, offsets_b, grad_b, num_features)
+    )
+    return grad_weight
 
 
 def infer_num_features(feature_set: str, output_size: int) -> int:

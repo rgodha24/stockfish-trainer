@@ -54,13 +54,13 @@ class ComposedFeatureTransformer(nn.Module):
         feature_offsets_1,
     ):
         merged = torch.cat([f.merged_weight() for f in self.features], dim=0)
-        return (
-            SparseLinearFunction.apply(
-                feature_indices_0, feature_offsets_0, merged, self.bias
-            ),
-            SparseLinearFunction.apply(
-                feature_indices_1, feature_offsets_1, merged, self.bias
-            ),
+        return SparseLinearFunction.apply(
+            feature_indices_0,
+            feature_offsets_0,
+            feature_indices_1,
+            feature_offsets_1,
+            merged,
+            self.bias,
         )
 
     @torch.no_grad()
