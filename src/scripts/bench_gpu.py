@@ -114,7 +114,6 @@ def run_train_step(
         black_indices,
         psqt_indices,
         layer_stack_indices,
-        score,
     )
     scorenet = scorenet * model.quantization.nnue2score
     loss = compute_loss(scorenet, outcome, score, args, epoch=0)

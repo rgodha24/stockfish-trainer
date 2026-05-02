@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import random
 import time
+from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
 from collections.abc import Iterator
+from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 import torch
@@ -21,18 +22,62 @@ from src.train.log import TrainingLogger
 
 LoaderMetricsFn = Callable[[], dict[str, float | int]]
 
+_gpu_phase_times: dict[str, list[float]] = defaultdict(list)
+_gpu_phase_active = False
+_NVTX_WARMUP_BATCHES = 5
+
+
+def reset_gpu_phase_times() -> None:
+    _gpu_phase_times.clear()
+
+
+def print_gpu_phase_summary() -> None:
+    if not _gpu_phase_times:
+        return
+    print("\n========== GPU Phase Times (CUDA events) ==========")
+    for name in [
+        "train_step",
+        "forward",
+        "backward",
+        "optimizer_step",
+        "loss",
+        "clip_weights",
+        "clip_input_weights",
+        "zero_grad",
+    ]:
+        times = _gpu_phase_times.get(name)
+        if times:
+            total_s = sum(times) / 1000.0
+            avg_ms = (total_s / len(times)) * 1000.0
+            print(
+                f"  {name:20s}: total={total_s:.3f}s  avg={avg_ms:.1f}ms  n={len(times)}"
+            )
+    print()
+
 
 @contextmanager
-def nvtx_range(enabled: bool, name: str) -> Iterator[None]:
+def nvtx_range(enabled: bool, name: str, sync: bool = True) -> Iterator[None]:
     if not enabled:
         with nullcontext():
             yield
         return
 
+    start_event = end_event = None
+    if _gpu_phase_active:
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
     torch.cuda.nvtx.range_push(name)
     try:
         yield
     finally:
+        if sync:
+            torch.cuda.synchronize()
+        if start_event is not None and end_event is not None:
+            end_event.record()
+            torch.cuda.synchronize()
+            _gpu_phase_times[name].append(start_event.elapsed_time(end_event))
         torch.cuda.nvtx.range_pop()
 
 
@@ -307,6 +352,10 @@ def run_training(
         )
         bench = getattr(args, "bench", False)
         nvtx_profile = getattr(args, "nvtx_profile", False)
+        global _gpu_phase_active
+        if nvtx_profile:
+            _gpu_phase_active = False
+            reset_gpu_phase_times()
         profiler = None
         if bench:
             profiler = torch.profiler.profile(
@@ -340,6 +389,9 @@ def run_training(
             for batch_idx, batch in enumerate(device_batches):
                 if batch_idx >= num_batches:
                     break
+                if nvtx_profile and batch_idx == _NVTX_WARMUP_BATCHES:
+                    reset_gpu_phase_times()
+                    _gpu_phase_active = True
                 with nvtx_range(nvtx_profile, "train_step"):
                     if batch_idx == 0:
                         with nvtx_range(nvtx_profile, "clip_input_weights"):
@@ -410,6 +462,7 @@ def run_training(
                     print(
                         "View: open chrome://tracing or edge://tracing and load the file"
                     )
+                    print_gpu_phase_summary()
                 return
 
             scheduler.step()
@@ -430,6 +483,8 @@ def run_training(
             lr = optimizer.param_groups[0]["lr"]
             epoch_loss = float(epoch_loss_sum.item()) / reduced_batches
             final_epoch = epoch
+            if _gpu_phase_active:
+                print_gpu_phase_summary()
             logger.finish_epoch(
                 epoch=epoch,
                 epoch_loss=epoch_loss,
