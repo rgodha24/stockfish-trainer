@@ -87,10 +87,12 @@ class NNUEModel(nn.Module):
         self,
         us: torch.Tensor,
         white_indices: torch.Tensor,
+        white_offsets: torch.Tensor,
         black_indices: torch.Tensor,
+        black_offsets: torch.Tensor,
         psqt_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        wp, bp = self.input(white_indices, black_indices)
+        wp, bp = self.input(white_indices, white_offsets, black_indices, black_offsets)
         w, wpsqt = torch.split(wp, self.L1, dim=1)
         b, bpsqt = torch.split(bp, self.L1, dim=1)
 
@@ -118,7 +120,9 @@ class NNUEModel(nn.Module):
         self,
         us: torch.Tensor,
         white_indices: torch.Tensor,
+        white_offsets: torch.Tensor,
         black_indices: torch.Tensor,
+        black_offsets: torch.Tensor,
         psqt_indices: torch.Tensor,
         layer_stack_indices: torch.Tensor,
         score: torch.Tensor,
@@ -131,7 +135,9 @@ class NNUEModel(nn.Module):
         l0_, psqt = self._transform_inputs(
             us,
             white_indices,
+            white_offsets,
             black_indices,
+            black_offsets,
             psqt_indices,
         )
         if isinstance(self.layer_stacks, MoELayerStacks):

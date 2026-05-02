@@ -402,7 +402,9 @@ def run_training(
                     (
                         us,
                         white_indices,
+                        white_offsets,
                         black_indices,
+                        black_offsets,
                         outcome,
                         score,
                         psqt_indices,
@@ -415,7 +417,9 @@ def run_training(
                         scorenet, log_dict = compiled_model(
                             us,
                             white_indices,
+                            white_offsets,
                             black_indices,
+                            black_offsets,
                             psqt_indices,
                             layer_stack_indices,
                             score,

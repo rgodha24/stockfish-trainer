@@ -64,7 +64,9 @@ def _move_batch_to_device(batch: Batch, device: torch.device) -> Batch:
     (
         us,
         white_indices,
+        white_offsets,
         black_indices,
+        black_offsets,
         outcome,
         score,
         psqt_indices,
@@ -74,7 +76,9 @@ def _move_batch_to_device(batch: Batch, device: torch.device) -> Batch:
     return (
         us.to(device, non_blocking=True),
         white_indices.to(device, non_blocking=True, dtype=torch.int32),
+        white_offsets.to(device, non_blocking=True, dtype=torch.int32),
         black_indices.to(device, non_blocking=True, dtype=torch.int32),
+        black_offsets.to(device, non_blocking=True, dtype=torch.int32),
         outcome.to(device, non_blocking=True),
         score.to(device, non_blocking=True),
         psqt_indices.to(device, non_blocking=True, dtype=torch.int64),
