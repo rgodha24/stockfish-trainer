@@ -184,6 +184,7 @@ fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'
     let owner_ref = owner_bound.borrow();
     let batch = owner_ref.batch.slab();
     let rows = batch.len();
+    let cols = batch.max_active_features();
 
     let is_white_view = ArrayView2::from_shape((rows, 1), batch.is_white_slice())
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -191,10 +192,10 @@ fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let score_view = ArrayView2::from_shape((rows, 1), batch.score_slice())
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    let white_indices_view = ArrayView1::from(batch.white_indices_slice());
-    let black_indices_view = ArrayView1::from(batch.black_indices_slice());
-    let white_offsets_view = ArrayView1::from(batch.white_offsets_slice());
-    let black_offsets_view = ArrayView1::from(batch.black_offsets_slice());
+    let white_view = ArrayView2::from_shape((rows, cols), batch.white_flat_slice())
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let black_view = ArrayView2::from_shape((rows, cols), batch.black_flat_slice())
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let psqt_indices_view = ArrayView1::from(batch.psqt_indices_slice());
     let layer_stack_indices_view = ArrayView1::from(batch.layer_stack_indices_slice());
 
@@ -203,14 +204,8 @@ fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'
     let outcome =
         unsafe { PyArray2::borrow_from_array(&outcome_view, owner_bound.clone().into_any()) };
     let score = unsafe { PyArray2::borrow_from_array(&score_view, owner_bound.clone().into_any()) };
-    let white_indices =
-        unsafe { PyArray1::borrow_from_array(&white_indices_view, owner_bound.clone().into_any()) };
-    let black_indices =
-        unsafe { PyArray1::borrow_from_array(&black_indices_view, owner_bound.clone().into_any()) };
-    let white_offsets =
-        unsafe { PyArray1::borrow_from_array(&white_offsets_view, owner_bound.clone().into_any()) };
-    let black_offsets =
-        unsafe { PyArray1::borrow_from_array(&black_offsets_view, owner_bound.clone().into_any()) };
+    let white = unsafe { PyArray2::borrow_from_array(&white_view, owner_bound.clone().into_any()) };
+    let black = unsafe { PyArray2::borrow_from_array(&black_view, owner_bound.clone().into_any()) };
     let psqt_indices =
         unsafe { PyArray1::borrow_from_array(&psqt_indices_view, owner_bound.clone().into_any()) };
     let layer_stack_indices = unsafe {
@@ -220,13 +215,20 @@ fn batch_to_pydict<'py>(py: Python<'py>, batch: PooledBatch) -> PyResult<Bound<'
     let dict = PyDict::new(py);
     dict.set_item("num_inputs", batch.num_inputs())?;
     dict.set_item("size", rows)?;
+    dict.set_item(
+        "num_active_white_features",
+        batch.num_active_white_features(),
+    )?;
+    dict.set_item(
+        "num_active_black_features",
+        batch.num_active_black_features(),
+    )?;
+    dict.set_item("max_active_features", cols)?;
     dict.set_item("is_white", is_white)?;
     dict.set_item("outcome", outcome)?;
     dict.set_item("score", score)?;
-    dict.set_item("white_indices", white_indices)?;
-    dict.set_item("black_indices", black_indices)?;
-    dict.set_item("white_offsets", white_offsets)?;
-    dict.set_item("black_offsets", black_offsets)?;
+    dict.set_item("white", white)?;
+    dict.set_item("black", black)?;
     dict.set_item("psqt_indices", psqt_indices)?;
     dict.set_item("layer_stack_indices", layer_stack_indices)?;
     Ok(dict)

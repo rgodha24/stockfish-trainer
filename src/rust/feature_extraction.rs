@@ -831,19 +831,22 @@ fn threat_feature_calc() -> &'static ThreatFeatureCalculation {
     })
 }
 
-fn debug_validate_sparse_features(_features: &[i32], _active_count: usize, _num_inputs: usize) {
+fn debug_validate_sparse_features(features: &[i32], active_count: usize, num_inputs: usize) {
     #[cfg(debug_assertions)]
     {
-        let active = &_features[.._active_count];
+        let active = &features[..active_count];
         for &feature in active {
-            debug_assert!((0.._num_inputs as i32).contains(&feature));
+            debug_assert!((0..num_inputs as i32).contains(&feature));
+        }
+        for pair in active.windows(2) {
+            let _ = pair;
         }
         let mut sorted = active.to_vec();
         sorted.sort_unstable();
         sorted
             .windows(2)
             .for_each(|pair| debug_assert_ne!(pair[0], pair[1]));
-        debug_assert!(_features[_active_count..].iter().all(|&value| value == -1));
+        debug_assert!(features[active_count..].iter().all(|&value| value == -1));
     }
 }
 

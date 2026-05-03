@@ -48,7 +48,6 @@
             cudaPackages.nsight_systems
 
             cmake
-            ninja
             pkg-config
 
             cacert

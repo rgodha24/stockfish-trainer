@@ -68,10 +68,8 @@ class SparseBatchTensorizer:
 
     def to_tuple(self, batch: dict[str, object]) -> Batch:
         us = self._maybe_pin(torch.from_numpy(batch["is_white"]))
-        white_indices = self._maybe_pin(torch.from_numpy(batch["white_indices"]))
-        white_offsets = self._maybe_pin(torch.from_numpy(batch["white_offsets"]))
-        black_indices = self._maybe_pin(torch.from_numpy(batch["black_indices"]))
-        black_offsets = self._maybe_pin(torch.from_numpy(batch["black_offsets"]))
+        white_indices = self._maybe_pin(torch.from_numpy(batch["white"]))
+        black_indices = self._maybe_pin(torch.from_numpy(batch["black"]))
         outcome = self._maybe_pin(torch.from_numpy(batch["outcome"]))
         score = self._maybe_pin(torch.from_numpy(batch["score"]))
         psqt_indices = self._maybe_pin(torch.from_numpy(batch["psqt_indices"]))
@@ -82,9 +80,7 @@ class SparseBatchTensorizer:
         return (
             us,
             white_indices,
-            white_offsets,
             black_indices,
-            black_offsets,
             outcome,
             score,
             psqt_indices,

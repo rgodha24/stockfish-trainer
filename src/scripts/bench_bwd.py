@@ -93,9 +93,7 @@ def run_forward(
     (
         us,
         white_indices,
-        white_offsets,
         black_indices,
-        black_offsets,
         outcome,
         score,
         psqt_indices,
@@ -105,12 +103,9 @@ def run_forward(
     scorenet, log_dict = compiled_model(
         us,
         white_indices,
-        white_offsets,
         black_indices,
-        black_offsets,
         psqt_indices,
         layer_stack_indices,
-        score,
     )
     scorenet = scorenet * model.quantization.nnue2score
     loss = compute_loss(scorenet, outcome, score, args, epoch=0)
